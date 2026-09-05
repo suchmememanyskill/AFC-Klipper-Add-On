@@ -34,8 +34,12 @@ class AFCCanvasLane(AFCLane):
     DEFAULT_ODOMETER_POLL_INTERVAL = 0.05
     DEFAULT_ODOMETER_LOAD_THRESHOLD = 3
     DEFAULT_EXTRUDER_FEED_CHUNK = 1.0
-    DEFAULT_LOAD_TO_TOOLHEAD_TIMEOUT = 30.0
+    DEFAULT_LOAD_TO_TOOLHEAD_TIMEOUT = 60.0
     DEFAULT_EXTRUDER_FEED_TIMEOUT = 10.0
+    DEFAULT_EJECT_EXTRA_DISTANCE = 200.0
+    DEFAULT_EJECT_CLEAR_DISTANCE = 30.0
+    DEFAULT_EJECT_STALL_TIMEOUT = 3.0
+    DEFAULT_PREP_CHECK_DISTANCE = 10.0
     DEFAULT_LOAD_ATTEMPTS = 3
     DEFAULT_LOAD_RECOVERY_RETRACT_DISTANCE = 30.0
     DEFAULT_CUTTER_WAIT_TIME = 3.0
@@ -44,7 +48,7 @@ class AFCCanvasLane(AFCLane):
 
     def __init__(self, config):
         super().__init__(config)
-        self.supports_lane_unload = False
+        self.supports_lane_unload = True
         self.drv8833_object_name = config.get("drv8833", None)
         if self.drv8833_object_name is None:
             raise CONFIG_ERROR(
@@ -84,6 +88,21 @@ class AFCCanvasLane(AFCLane):
             "load_recovery_retract_distance",
             self.DEFAULT_LOAD_RECOVERY_RETRACT_DISTANCE,
             minval=0.0,
+        )
+        # Lane eject (LANE_UNLOAD): retract until the lane's entry sensor clears, then
+        # a little further so the drive gear lets go of the filament. The spool
+        # holder's spring rewinder takes up what it can of the returned filament.
+        self.eject_speed = config.getfloat("eject_speed", None, above=0.0)
+        self.eject_max_distance = config.getfloat("eject_max_distance", None, above=0.0)
+        self.eject_clear_distance = config.getfloat(
+            "eject_clear_distance", self.DEFAULT_EJECT_CLEAR_DISTANCE, minval=0.0
+        )
+        self.eject_stall_timeout = config.getfloat(
+            "eject_stall_timeout", self.DEFAULT_EJECT_STALL_TIMEOUT, above=0.0
+        )
+        # Distance to move filament back and forth during PREP to verify it moves, 0 disables
+        self.prep_check_distance = config.getfloat(
+            "prep_check_distance", self.DEFAULT_PREP_CHECK_DISTANCE, minval=0.0
         )
         self.odometer_count = 0
         self.last_odometer_eventtime = None
@@ -332,6 +351,44 @@ class AFCCanvasLane(AFCLane):
 
         return min(moved, target_distance)
 
+    def retract_until_prep_clear(self, speed, max_distance, stall_timeout):
+        """
+        Retract filament until the lane's entry (prep) sensor no longer sees it.
+
+        The odometer only guards the move: it stops the motor when the filament
+        stops moving for ``stall_timeout`` seconds, or after ``max_distance``
+        without the sensor clearing. Once the filament tip has passed the
+        odometer wheel the count stops, so the stall timeout has to be longer
+        than the time it takes to cover the wheel-to-sensor distance.
+
+        :param speed: Retract speed in mm/s
+        :param max_distance: Give up after this much odometer travel
+        :param stall_timeout: Give up when the odometer stops counting for this long
+        :return tuple: (sensor cleared, odometer distance moved)
+        """
+        poll_interval = max(self.odometer_poll_interval, 0.01)
+        self.reset_odometer()
+        self.unit_obj.select_lane(self)
+        moved = 0.0
+        last_count = 0
+        now = self.reactor.monotonic()
+        last_progress = now
+        try:
+            self.canvas_motor.drv8833_set_speed(-abs(speed))
+            while bool(self.prep_state):
+                now = self.reactor.pause(now + poll_interval)
+                moved = self.get_odometer_distance()
+                if self.odometer_count != last_count:
+                    last_count = self.odometer_count
+                    last_progress = now
+                elif now - last_progress >= stall_timeout:
+                    return False, moved
+                if moved >= max_distance:
+                    return False, moved
+        finally:
+            self.canvas_motor.drv8833_set_speed(0.0)
+        return True, moved
+
     def _run_cutter_macro(self) -> None:
         """
         Run the configured filament cutter macro.
@@ -424,7 +481,7 @@ class AFCCanvasLane(AFCLane):
                 now = self.reactor.monotonic()
                 if now - start > self.load_to_toolhead_timeout:
                     self.canvas_motor.drv8833_set_speed(0.0)
-                    self.logger.warning("CANVAS tool load timed out while moving filament to the extruder. Attempting recovery.")
+                    self.logger.warning(f"CANVAS tool load timed out after {self.load_to_toolhead_timeout:g}s while moving filament to the extruder (load_to_toolhead_timeout). Attempting recovery.")
                     toolhead_sensor_load_fail = True
 
                     try:
@@ -454,7 +511,7 @@ class AFCCanvasLane(AFCLane):
                         "CANVAS tool load extra move",
                     )
                 except TimeoutError:
-                    self.logger.warning("CANVAS tool load timed out while moving filament from the hub to the extruder. Attempting recovery.")
+                    self.logger.warning(f"CANVAS tool load timed out after {self.extruder_feed_timeout:g}s while moving filament from the hub to the extruder (extruder_feed_timeout). Attempting recovery.")
                     self.disengage_motors(1.0)
                     self.afc.move_e_pos(-(self.hub_obj.afc_bowden_length + load_attempt), self.extruder_obj.tool_load_speed, "CANVAS tool load recovery retract", wait_tool=True)
 

@@ -22,6 +22,7 @@ try:
         SpeedMode,
         AFCHomingPoints,
         AFCLane,
+        AFCLaneState,
     )
 except Exception:
     raise CONFIG_ERROR(
@@ -132,7 +133,10 @@ class afcCanvas(afcUnit):
 
     def lane_not_ready(self, lane):
         self.logger.debug(f"lane_not_ready: {lane.name}")
-        getattr(lane, "apply_canvas_led")(self.afc.led_not_ready)
+        # An empty lane is shown with the LED off, as PREP does; the not-ready
+        # colour is for a lane that has filament but cannot be used.
+        color = self.afc.led_not_ready if lane.prep_state else self.afc.led_off
+        getattr(lane, "apply_canvas_led")(color)
 
     def lane_loaded(self, lane):
         self.logger.debug(f"lane_loaded: {lane.name}")
@@ -174,6 +178,102 @@ class afcCanvas(afcUnit):
         self.logger.debug(f"lane_illuminate_spool: {lane.name}")
         getattr(lane, "apply_canvas_led")(self.afc.led_spool_illum)
 
+    def eject_lane(self, lane):
+        """
+        Eject the filament from a CANVAS lane so the spool can be removed.
+
+        Retracts until the lane's entry sensor no longer sees filament, then a
+        little further so the drive gear releases it. The spool holder's spring
+        rewinder takes up what it can of the returned filament. Called by
+        LANE_UNLOAD, which has already checked that the printer is idle and the
+        lane is not in the toolhead.
+
+        :param lane: Lane to eject
+        """
+        if (lane.extruder_obj.lane_loaded is None
+            and lane.get_toolhead_pre_sensor_state()):
+            self.afc.error.handle_lane_failure(
+                lane,
+                "eject refused: the toolhead sensor still sees filament. "
+                "Unload the toolhead first (TOOL_UNLOAD) or clear the hub.",
+                pause=False,
+            )
+            return
+
+        speed = lane.eject_speed if lane.eject_speed is not None else lane.long_moves_speed
+        max_distance = lane.eject_max_distance
+        if max_distance is None:
+            max_distance = lane.dist_hub + lane.DEFAULT_EJECT_EXTRA_DISTANCE
+
+        self.logger.info(f"Ejecting {lane.name}")
+        self.lane_unloading(lane)
+        try:
+            if lane.prep_state:
+                cleared, moved = lane.retract_until_prep_clear(
+                    speed, max_distance, lane.eject_stall_timeout
+                )
+                if not cleared:
+                    if moved >= max_distance:
+                        reason = (f"the entry sensor still sees filament after retracting {moved:.0f}mm "
+                                  "(eject_max_distance)")
+                    else:
+                        reason = (f"the filament stopped moving after {moved:.0f}mm. Check the spool "
+                                  "and the path from the spool to the unit; after a runout, pull the "
+                                  "remaining filament out of the lane by hand")
+                    self.afc.error.handle_lane_failure(
+                        lane, f"eject failed: {reason}.", pause=False
+                    )
+                    return
+                self.logger.info(f"{lane.name} entry sensor clear after {moved:.0f}mm")
+            if lane.eject_clear_distance > 0:
+                lane.move(-lane.eject_clear_distance, speed, lane.short_moves_accel, False)
+        finally:
+            lane.disengage_motors(-1.0)
+        lane._load_state = False
+
+    def calibrate_lane(self, cur_lane, tol):
+        """
+        CANVAS lanes have no distance to calibrate: loads run until the toolhead
+        sensor triggers and unloads are measured by the lane odometer, so
+        dist_hub is never used for movement. Report that instead of failing.
+        """
+        return True, "calibration_lane", 0
+
+    def calibrate_bowden(self, cur_lane, dis, tol):
+        return True, "calibration_lane", 0
+
+    def calibration_lane_message(self) -> str:
+        msg = "\nCANVAS lanes ({lanes}) need no distance calibration: loading runs until the "
+        msg += "toolhead sensor triggers and unloading is measured by the lane odometer.\n"
+        return msg
+
+    def _move_lane(self, lane, delay, enable_movement=True):
+        """
+        PREP movement check: move the filament a short distance back and then
+        forward again while watching the lane odometer.
+
+        :param lane: Lane to check
+        :param delay: Pause between the two moves
+        :param enable_movement: False skips the movement
+        :return bool: True when the filament moved (or the check is disabled),
+                      False when the odometer saw no movement
+        """
+        distance = getattr(lane, "prep_check_distance", 0.0)
+        if not enable_movement or distance <= 0:
+            return True
+        moved = True
+        last_direction = -1.0
+        try:
+            lane.move_with_odometer(-distance, lane.short_moves_speed)
+            self.reactor.pause(self.reactor.monotonic() + delay)
+            last_direction = 1.0
+            lane.move_with_odometer(distance, lane.short_moves_speed)
+        except TimeoutError:
+            moved = False
+        finally:
+            lane.disengage_motors(last_direction)
+        return moved
+
     def cutter_callback(self, eventtime, state):
         self.cutter_sensor_state = bool(state)
 
@@ -202,7 +302,6 @@ class afcCanvas(afcUnit):
         assignTcmd: bool,
         enable_movement: bool,
     ) -> bool:
-        # For now, ignore movement checks
         msg = ""
         succeeded = True
         prep_state = self._get_startup_prep_state(cur_lane)
@@ -213,18 +312,27 @@ class afcCanvas(afcUnit):
             self.lane_unloaded(cur_lane)
             msg = "EMPTY READY FOR SPOOL"
         else:
-            self.lane_loaded(cur_lane)
-            msg = "FILAMENT PRESENT"
-
-            if (cur_lane.tool_loaded
-                and cur_lane.extruder_obj is not None
-                and cur_lane.extruder_obj.lane_loaded == cur_lane.name):
+            in_toolhead = (cur_lane.tool_loaded
+                           and cur_lane.extruder_obj is not None
+                           and cur_lane.extruder_obj.lane_loaded == cur_lane.name)
+            if in_toolhead:
+                self.lane_loaded(cur_lane)
+                msg = "FILAMENT PRESENT"
                 cur_lane.sync_to_extruder()
                 if self.afc.current == cur_lane.name:
                     self.lane_tool_loaded(cur_lane)
+                    cur_lane.status = AFCLaneState.TOOLED
                 else:
                     self.lane_tool_loaded_idle(cur_lane)
                 msg += " in ToolHead"
+            elif self._move_lane(cur_lane, delay, enable_movement):
+                self.lane_loaded(cur_lane)
+                cur_lane.status = AFCLaneState.LOADED
+                msg = "FILAMENT PRESENT"
+            else:
+                self.lane_fault(cur_lane)
+                msg = "<span class=error--text>FILAMENT PRESENT BUT NOT MOVING, check the spool and lane</span>"
+                succeeded = False
 
         if assignTcmd:
             self.afc.function.TcmdAssign(cur_lane)
