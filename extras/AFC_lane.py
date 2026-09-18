@@ -136,7 +136,6 @@ class AFCLane:
         self.runout_lane        = None
         self.status             = AFCLaneState.NONE
         self.need_purge         = False
-        self.supports_lane_unload: bool = True
         self._afc_staged_spool_id: Optional[int] = None
         self._load_suppressed: bool = False
         # END TODO

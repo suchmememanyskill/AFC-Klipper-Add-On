@@ -9,31 +9,6 @@ from extras.AFC_lane import AFCHomingPoints, AFCLane, AFCMoveWarning, SpeedMode
 from tests.conftest import MockAFC, MockConfig, MockLogger, MockPrinter, MockReactor
 
 
-def _make_real_canvas_lane():
-    afc = MockAFC()
-    afc.load_to_hub = False
-    printer = MockPrinter(afc=afc)
-    printer._objects["drv8833 motor"] = MagicMock()
-    config = MockConfig(
-        name="AFC_stepper lane1",
-        printer=printer,
-        values={
-            "unit": "CANVAS_1:0",
-            "drv8833": "motor",
-            "odometer_pin": "PA0",
-            "odometer_resolution": 0.5,
-        },
-    )
-    return AFCCanvasLane(config)
-
-
-class TestAFCCanvasLaneInit:
-    def test_lane_unload_is_not_supported(self):
-        lane = _make_real_canvas_lane()
-
-        assert lane.supports_lane_unload is False
-
-
 def _make_canvas_lane(name="lane1"):
     lane = AFCCanvasLane.__new__(AFCCanvasLane)
     afc = MockAFC()

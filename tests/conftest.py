@@ -447,6 +447,7 @@ class MockAFC:
         self.enable_assist_weight = 500.0
         self.assisted_unload = True
         self.unload_on_runout = False
+        self.clear_spool_after_eject = True
         self.td1_when_loaded = False
         self.home_to_tool = True
         self.homing_enabled = True

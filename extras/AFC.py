@@ -267,6 +267,7 @@ class afc:
         self.assisted_unload        = config.getboolean("assisted_unload", True)    # If True, the unload retract is assisted to prevent loose windings, especially on full spools. This can prevent loops from slipping off the spool
         self.bypass_pause           = config.getboolean("pause_when_bypass_active", False) # When true AFC pauses print when change tool is called and bypass is loaded
         self.unload_on_runout       = config.getboolean("unload_on_runout", False)  # When True AFC will unload lane and then pause when runout is triggered and spool to swap to is not set(infinite spool)
+        self.clear_spool_after_eject: bool = config.getboolean("clear_spool_after_eject", True)
         self.short_stats            = config.getboolean("print_short_stats", False) # Set to true to print AFC_STATS in short form instead of wide form, printing short form is better for smaller in width consoles
         # Setting to True enables espooler assist while printing
         self.enable_assist          = config.getboolean("enable_assist",        True)
@@ -1339,14 +1340,14 @@ class afc:
         cur_lane = self.lanes[lane]
         self.LANE_UNLOAD( cur_lane )
 
-    def LANE_UNLOAD(self, cur_lane: AFCLane):
+    def LANE_UNLOAD(self, cur_lane: AFCLane) -> None:
+        """
+        Eject a lane that is not loaded in the toolhead.
+
+        :param cur_lane: lane to eject
+        """
         # TODO: update this to unload from toolhead and move all the way back to load
         # when homing is enabled
-
-        if not cur_lane.supports_lane_unload:
-            msg = f"Unloading is not supported on {cur_lane.unit}"
-            self.logger.warning(msg)
-            return
 
         self.current_state = State.EJECTING_LANE
 
@@ -1369,8 +1370,8 @@ class afc:
             self.function.select_loaded_lane()
             self.save_vars()
 
-            # Removing spool from vars since it was ejected
-            self.spool.set_spoolID(cur_lane, None)
+            if self.clear_spool_after_eject:
+                self.spool.set_spoolID(cur_lane, None)
             self.logger.info("LANE {} eject done".format(cur_lane.name))
             cur_lane.unit_obj.lane_not_ready(cur_lane)
         elif cur_lane.extruder_obj.is_standalone() and cur_lane.extruder_obj.lane_loaded:

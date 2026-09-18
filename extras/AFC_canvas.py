@@ -43,6 +43,8 @@ class afcCanvas(afcUnit):
         self.type = config.get("type", "canvas")
         self.prep_distance = config.getfloat("prep_distance", self.short_move_dis)
         self.prep_speed = config.getfloat("prep_speed", self.short_moves_speed)
+        self.eject_distance = config.getfloat("eject_distance", self.short_move_dis, above=0)
+        self.eject_speed = config.getfloat("eject_speed", self.long_moves_speed, above=0)
         self.cutter_sensor_pin = config.get(
             "cutter_sensor_pin", config.get("cutter_pin", None)
         )
@@ -56,6 +58,17 @@ class afcCanvas(afcUnit):
                 [self.cutter_sensor_pin], self.cutter_callback
             )
 
+    def eject_lane(self, lane: AFCLane):
+        try:
+            getattr(lane, "move_with_odometer")(
+                -self.eject_distance,
+                self.eject_speed,
+                stop_condition=lambda: not bool(lane.prep_state),
+            )
+        except TimeoutError:
+            self.logger.warning(f"eject_lane: {lane.name} timed out")
+
+        getattr(lane, 'disengage_motors')(-1.0)
 
     def handle_connect(self):
         super().handle_connect()

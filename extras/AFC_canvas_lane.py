@@ -44,7 +44,6 @@ class AFCCanvasLane(AFCLane):
 
     def __init__(self, config):
         super().__init__(config)
-        self.supports_lane_unload = False
         self.drv8833_object_name = config.get("drv8833", None)
         if self.drv8833_object_name is None:
             raise CONFIG_ERROR(
@@ -263,6 +262,7 @@ class AFCCanvasLane(AFCLane):
         self._set_gpio_pin(self.red_led_pin, red_value)
         self._set_gpio_pin(self.white_led_pin, white_value)
 
+    # Positive direction: Disengage backwards (forwards motion just happened), Negative direction: Disengage forwards (backwards motion just happened)
     def disengage_motors(self, direction):
         if self.disengage_distance <= 0:
             self.do_enable(False)
@@ -424,7 +424,7 @@ class AFCCanvasLane(AFCLane):
                 now = self.reactor.monotonic()
                 if now - start > self.load_to_toolhead_timeout:
                     self.canvas_motor.drv8833_set_speed(0.0)
-                    self.logger.warning("CANVAS tool load timed out while moving filament to the extruder. Attempting recovery.")
+                    self.logger.warning("CANVAS tool load timed out while moving filament to the hub. Attempting recovery.")
                     toolhead_sensor_load_fail = True
 
                     try:

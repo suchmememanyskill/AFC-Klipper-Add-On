@@ -207,13 +207,21 @@ def _make_afc():
     return obj
 
 
-def _make_lane_unload_test_objects(supports_lane_unload):
+def _make_lane_unload_test_objects(clear_spool_after_eject=None):
     """Build AFC and lane objects for LANE_UNLOAD tests."""
     from tests.conftest import MockAFC, MockConfig, MockLogger, MockPrinter
 
     inner = MockAFC()
     printer = MockPrinter(afc=inner)
-    obj = afc(MockConfig(name="AFC", printer=printer))
+    config_values = {}
+    if clear_spool_after_eject is not None:
+        config_values["clear_spool_after_eject"] = clear_spool_after_eject
+    config = MockConfig(
+        name="AFC",
+        printer=printer,
+        values=config_values,
+    )
+    obj = afc(config)
     obj.logger = MockLogger()
     obj.function = MagicMock()
     obj.save_vars = MagicMock()
@@ -221,8 +229,6 @@ def _make_lane_unload_test_objects(supports_lane_unload):
 
     lane = MagicMock()
     lane.name = "lane1"
-    lane.unit = "CANVAS_1"
-    lane.supports_lane_unload = supports_lane_unload
     lane.status = AFCLaneState.LOADED
     lane.loaded_to_hub = True
     lane.extruder_obj.lane_loaded = None
@@ -231,28 +237,13 @@ def _make_lane_unload_test_objects(supports_lane_unload):
 
 
 class TestLaneUnload:
-    def test_unsupported_lane_logs_warning_without_changing_state(self):
-        obj, lane = _make_lane_unload_test_objects(False)
-        original_state = obj.current_state
-
-        obj.LANE_UNLOAD(lane)
-
-        assert obj.logger.messages == [
-            ("warning", "Unloading is not supported on CANVAS_1")
-        ]
-        assert obj.current_state == original_state
-        assert lane.status == AFCLaneState.LOADED
-        assert lane.loaded_to_hub is True
-        lane.unit_obj.eject_lane.assert_not_called()
-        obj.save_vars.assert_not_called()
-        obj.spool.set_spoolID.assert_not_called()
-
-    def test_supported_lane_runs_unload(self):
-        obj, lane = _make_lane_unload_test_objects(True)
+    def test_lane_runs_unload_and_clears_spool_by_default(self):
+        obj, lane = _make_lane_unload_test_objects()
 
         obj.LANE_UNLOAD(lane)
 
         assert obj.logger.messages == [("info", "LANE lane1 eject done")]
+        assert obj.clear_spool_after_eject is True
         assert obj.current_state == State.IDLE
         assert lane.status == AFCLaneState.NONE
         assert lane.loaded_to_hub is False
@@ -263,8 +254,25 @@ class TestLaneUnload:
         obj.spool.set_spoolID.assert_called_once_with(lane, None)
         assert obj.save_vars.call_count == 2
 
+    def test_clear_spool_disabled_preserves_spool_assignment(self):
+        obj, lane = _make_lane_unload_test_objects(False)
+
+        obj.LANE_UNLOAD(lane)
+
+        assert obj.logger.messages == [("info", "LANE lane1 eject done")]
+        assert obj.clear_spool_after_eject is False
+        assert obj.current_state == State.IDLE
+        assert lane.status == AFCLaneState.NONE
+        assert lane.loaded_to_hub is False
+        lane.unit_obj.eject_lane.assert_called_once_with(lane)
+        lane.unit_obj.return_to_home.assert_called_once_with()
+        lane.unit_obj.lane_not_ready.assert_called_once_with(lane)
+        obj.function.select_loaded_lane.assert_called_once_with()
+        obj.spool.set_spoolID.assert_not_called()
+        assert obj.save_vars.call_count == 2
+
     def test_loaded_toolhead_lane_logs_info_without_unloading(self):
-        obj, lane = _make_lane_unload_test_objects(True)
+        obj, lane = _make_lane_unload_test_objects()
         lane.extruder_obj.lane_loaded = lane.name
 
         obj.LANE_UNLOAD(lane)
@@ -281,7 +289,7 @@ class TestLaneUnload:
         obj.spool.set_spoolID.assert_not_called()
 
     def test_standalone_loaded_lane_runs_extruder_unload(self):
-        obj, lane = _make_lane_unload_test_objects(True)
+        obj, lane = _make_lane_unload_test_objects()
         lane.extruder_obj.is_standalone.return_value = True
         lane.extruder_obj.lane_loaded = "lane2"
         lane.extruder_obj.tool_stn_unload = 12.0
@@ -298,7 +306,7 @@ class TestLaneUnload:
         obj.spool.set_spoolID.assert_not_called()
 
     def test_empty_standalone_lane_does_nothing(self):
-        obj, lane = _make_lane_unload_test_objects(True)
+        obj, lane = _make_lane_unload_test_objects()
         lane.extruder_obj.is_standalone.return_value = True
         lane.extruder_obj.lane_loaded = None
 
