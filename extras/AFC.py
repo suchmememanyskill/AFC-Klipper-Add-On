@@ -1372,8 +1372,9 @@ class afc:
 
             if self.clear_spool_after_eject:
                 self.spool.set_spoolID(cur_lane, None)
+                cur_lane.unit_obj.lane_not_ready(cur_lane)
+
             self.logger.info("LANE {} eject done".format(cur_lane.name))
-            cur_lane.unit_obj.lane_not_ready(cur_lane)
         elif cur_lane.extruder_obj.is_standalone() and cur_lane.extruder_obj.lane_loaded:
             cur_lane.status = AFCLaneState.EJECTING
             cur_lane.extruder_obj.load_unload_sequence(cur_lane.extruder_obj.tool_stn_unload*-1)
