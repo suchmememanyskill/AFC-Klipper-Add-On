@@ -186,7 +186,18 @@ class afcFunction:
             fp.write(self.auto_save_top_comment)
             config.write(fp)
 
-    def ConfigRewrite(self, rawsection, rawkey, rawvalue, msg=""):
+    def ConfigRewrite(self, rawsection: str, rawkey: str, rawvalue: Any, msg: str = "") -> None:
+        if self.afc.config_save_method == "kalico":
+            configfile = self.printer.lookup_object("configfile")
+            configfile.set(rawsection, rawkey, rawvalue)
+            self.afc.gcode.run_script_from_command("SAVE_CONFIG RESTART=0")
+            msg += (
+                f"\n<span class=info--text>Saved {rawkey}:{rawvalue} in "
+                f"{rawsection} section to printer.cfg SAVE_CONFIG block</span>"
+            )
+            self.logger.info(msg)
+            return
+
         taskdone = False
         sectionfound = False
         # Creating regex pattern based off rawsection

@@ -148,6 +148,43 @@ class TestAfcVersion:
             assert part.isdigit(), f"Non-numeric version part: {part!r}"
 
 
+class TestAfcInitConfigSaveMethod:
+    def test_defaults_to_afc(self):
+        from tests.conftest import MockConfig, MockPrinter
+
+        config = MockConfig(name="AFC", printer=MockPrinter())
+
+        obj = afc(config)
+
+        assert obj.config_save_method == "afc"
+
+    def test_accepts_explicit_afc(self):
+        from tests.conftest import MockConfig, MockPrinter
+
+        config = MockConfig(
+            name="AFC",
+            printer=MockPrinter(),
+            values={"config_save_method": "afc"},
+        )
+
+        obj = afc(config)
+
+        assert obj.config_save_method == "afc"
+
+    def test_accepts_kalico(self):
+        from tests.conftest import MockConfig, MockPrinter
+
+        config = MockConfig(
+            name="AFC",
+            printer=MockPrinter(),
+            values={"config_save_method": "kalico"},
+        )
+
+        obj = afc(config)
+
+        assert obj.config_save_method == "kalico"
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _make_afc():

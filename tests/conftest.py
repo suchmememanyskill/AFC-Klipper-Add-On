@@ -14,6 +14,7 @@ import pathlib
 import queue
 import sys
 import types
+from typing import Any, Dict
 from unittest.mock import MagicMock, patch  # noqa: F401
 
 import pytest
@@ -423,6 +424,7 @@ class MockAFC:
         self.save_vars = MagicMock()
         self.tool_cmds: dict = {}
         self.VarFile = "/tmp/afc_test_vars"
+        self.config_save_method = "afc"
         # LED colour defaults
         self.led_fault = "1,0,0,0"
         self.led_ready = "0,1,0,0"
@@ -579,6 +581,25 @@ class MockConfig:
     def getlists(self, option, default=None, **kwargs):
         val = self._values.get(option, default)
         return val if val is not None else ()
+
+    def getchoice(
+        self,
+        option: str,
+        choices: Dict[Any, Any],
+        default: Any = None,
+        **kwargs: Any,
+    ) -> Any:
+        """
+        Return a configured value mapped through the allowed choices.
+
+        :param option: Config option name
+        :param choices: Mapping of allowed raw values to returned values
+        :param default: Default raw value
+        :param kwargs: Unused ConfigWrapper compatibility arguments
+        :return Any: Mapped configuration value
+        """
+        val = self._values.get(option, default)
+        return choices[val]
 
     def error(self, msg):
         from configfile import error as KlipperError

@@ -23,6 +23,8 @@ from tests.test_AFC import _make_afc
 from tests.test_AFC_lane import _make_afc_lane
 
 from copy import deepcopy
+from pathlib import Path
+from typing import Tuple
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -44,6 +46,158 @@ def _make_func():
     func.pause = False
     func.mcu = MagicMock()
     return func
+
+
+def _make_config_function(
+    tmp_path: Path,
+    save_method: str,
+) -> Tuple[afcFunction, MagicMock]:
+    """
+    Build an AFC function object through its initializer for config save tests.
+
+    :param tmp_path: Temporary AFC configuration directory
+    :param save_method: Config persistence backend to select
+    :return tuple: AFC function object and mocked Kalico configfile object
+    """
+    from tests.conftest import MockAFC, MockConfig, MockPrinter
+
+    afc = MockAFC()
+    afc.config_save_method = save_method
+    afc.VarFile = str(tmp_path.joinpath("AFC.var"))
+    afc.cfgloc = str(tmp_path)
+    printer = MockPrinter(afc=afc)
+    configfile = MagicMock()
+    printer._objects["configfile"] = configfile
+    config = MockConfig(name="AFC_functions", printer=printer)
+    config.access_tracking = {}
+    func = afcFunction(config)
+    printer.send_event("klippy:connect")
+    return func, configfile
+
+
+class TestAfcFunctionConfigRewrite:
+    def test_kalico_stages_and_saves_to_printer_config(self, tmp_path):
+        func, configfile = _make_config_function(tmp_path, "kalico")
+
+        func.ConfigRewrite(
+            "AFC_stepper lane1",
+            "dist_hub",
+            875.5,
+            "lane1 calibrated",
+        )
+
+        configfile.set.assert_called_once_with(
+            "AFC_stepper lane1",
+            "dist_hub",
+            875.5,
+        )
+        func.afc.gcode.run_script_from_command.assert_called_once_with(
+            "SAVE_CONFIG RESTART=0"
+        )
+        assert func.logger.messages == [
+            (
+                "info",
+                "lane1 calibrated\n<span class=info--text>Saved dist_hub:875.5 in "
+                "AFC_stepper lane1 section to printer.cfg SAVE_CONFIG block</span>",
+            )
+        ]
+        assert not tmp_path.joinpath("AFC_auto_vars.cfg").exists()
+
+    def test_afc_rewrites_existing_value_and_preserves_comment(self, tmp_path):
+        func, configfile = _make_config_function(tmp_path, "afc")
+        config_path = tmp_path.joinpath("lane.cfg")
+        config_path.write_text(
+            "[AFC_stepper lane1]\n"
+            "other_value: 10\n"
+            "dist_hub: 900 # Distance to hub\n"
+        )
+
+        func.ConfigRewrite(
+            "AFC_stepper lane1",
+            "dist_hub",
+            875,
+            "lane1 calibrated",
+        )
+
+        assert config_path.read_text() == (
+            "[AFC_stepper lane1]\n"
+            "other_value: 10\n"
+            "dist_hub: 875 # Distance to hub\n"
+        )
+        configfile.set.assert_not_called()
+        func.afc.gcode.run_script_from_command.assert_not_called()
+        assert func.logger.messages == [
+            (
+                "info",
+                "lane1 calibrated\n<span class=info--text>Saved dist_hub:875 in "
+                "AFC_stepper lane1 section to configuration file</span>",
+            )
+        ]
+
+    def test_afc_rewrites_existing_value_without_comment(self, tmp_path):
+        func, configfile = _make_config_function(tmp_path, "afc")
+        config_path = tmp_path.joinpath("lane.cfg")
+        config_path.write_text(
+            "[other]\n"
+            "value: 1\n"
+            "[AFC_stepper lane1]\n"
+            "dist_hub: 900\n"
+        )
+
+        func.ConfigRewrite("AFC_stepper lane1", "dist_hub", 875)
+
+        assert config_path.read_text() == (
+            "[other]\n"
+            "value: 1\n"
+            "[AFC_stepper lane1]\n"
+            "dist_hub: 875 \n"
+        )
+        configfile.set.assert_not_called()
+        func.afc.gcode.run_script_from_command.assert_not_called()
+        assert func.logger.messages == [
+            (
+                "info",
+                "\n<span class=info--text>Saved dist_hub:875 in AFC_stepper "
+                "lane1 section to configuration file</span>",
+            )
+        ]
+
+    def test_afc_missing_value_uses_auto_vars_and_skips_non_configs(self, tmp_path):
+        func, configfile = _make_config_function(tmp_path, "afc")
+        config_path = tmp_path.joinpath("lane.cfg")
+        config_path.write_text(
+            "[AFC_stepper lane1]\n"
+            "other_value: 10\n"
+            "[next_section]\n"
+            "value: 1\n"
+        )
+        text_path = tmp_path.joinpath("ignored.txt")
+        text_path.write_text("unchanged")
+        directory_path = tmp_path.joinpath("ignored.cfg")
+        directory_path.mkdir()
+
+        func.ConfigRewrite("AFC_stepper lane1", "dist_hub", "875")
+
+        auto_vars = tmp_path.joinpath("AFC_auto_vars.cfg").read_text()
+        assert "[AFC_stepper lane1]" in auto_vars
+        assert "dist_hub : 875" in auto_vars
+        assert config_path.read_text() == (
+            "[AFC_stepper lane1]\n"
+            "other_value: 10\n"
+            "[next_section]\n"
+            "value: 1\n"
+        )
+        assert text_path.read_text() == "unchanged"
+        assert directory_path.is_dir()
+        configfile.set.assert_not_called()
+        func.afc.gcode.run_script_from_command.assert_not_called()
+        assert func.logger.messages == [
+            (
+                "info",
+                "\n<span class=info--text>Key dist_hub not found in section "
+                "AFC_stepper lane1 added to AFC_auto_vars.cfg file</span>",
+            )
+        ]
 
 
 # ── round_floats ─────────────────────────────────────────────────────────────
