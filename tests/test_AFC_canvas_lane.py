@@ -179,7 +179,7 @@ def test_odometer_load_threshold_is_configurable(monkeypatch):
 def test_canvas_load_timeouts_have_expected_defaults(monkeypatch):
     lane = _make_configured_canvas_lane(monkeypatch)
 
-    assert lane.load_to_toolhead_timeout == 30.0
+    assert lane.load_to_toolhead_timeout == 60.0
     assert lane.extruder_feed_timeout == 10.0
 
 

@@ -187,6 +187,46 @@ class afcCanvas(afcUnit):
         self.logger.debug(f"lane_illuminate_spool: {lane.name}")
         getattr(lane, "apply_canvas_led")(self.afc.led_spool_illum)
 
+    def calibrate_lane(self, cur_lane, tol):
+        """
+        CANVAS lanes have no distance to calibrate: loads run until the toolhead
+        sensor triggers and unloads are measured by the lane odometer, so
+        dist_hub is never used for movement. Report that instead of failing.
+        """
+        return True, "calibration_lane", 0
+
+    def calibrate_bowden(self, cur_lane, dis, tol):
+        return True, "calibration_lane", 0
+
+    def calibration_lane_message(self) -> str:
+        msg = "\nCANVAS lanes ({lanes}) need no distance calibration: loading runs until the "
+        msg += "toolhead sensor triggers and unloading is measured by the lane odometer.\n"
+        return msg
+
+    def _move_lane(self, lane, delay, enable_movement=True):
+        """
+        PREP movement check: move the filament a short distance back and then
+        forward again while watching the lane odometer.
+
+        :return bool: True when the filament moved (or the check is disabled),
+                      False when the odometer saw no movement
+        """
+        distance = lane.prep_check_distance
+        if not enable_movement or distance <= 0:
+            return True
+        moved = True
+        last_direction = -1.0
+        try:
+            lane.move_with_odometer(-distance, lane.short_moves_speed)
+            self.reactor.pause(self.reactor.monotonic() + delay)
+            last_direction = 1.0
+            lane.move_with_odometer(distance, lane.short_moves_speed)
+        except TimeoutError:
+            moved = False
+        finally:
+            lane.disengage_motors(last_direction)
+        return moved
+
     def cutter_callback(self, eventtime, state):
         self.cutter_sensor_state = bool(state)
 
@@ -215,7 +255,6 @@ class afcCanvas(afcUnit):
         assignTcmd: bool,
         enable_movement: bool,
     ) -> bool:
-        # For now, ignore movement checks
         msg = ""
         succeeded = True
         prep_state = self._get_startup_prep_state(cur_lane)
@@ -226,12 +265,18 @@ class afcCanvas(afcUnit):
             self.lane_unloaded(cur_lane)
             msg = "EMPTY READY FOR SPOOL"
         else:
-            self.lane_loaded(cur_lane)
-            msg = "FILAMENT PRESENT"
+            in_toolhead = (cur_lane.tool_loaded
+                           and cur_lane.extruder_obj is not None
+                           and cur_lane.extruder_obj.lane_loaded == cur_lane.name)
+            if not in_toolhead and not self._move_lane(cur_lane, delay, enable_movement):
+                self.lane_fault(cur_lane)
+                msg = "<span class=error--text>FILAMENT PRESENT BUT NOT MOVING, check the spool and lane</span>"
+                succeeded = False
+            else:
+                self.lane_loaded(cur_lane)
+                msg = "FILAMENT PRESENT"
 
-            if (cur_lane.tool_loaded
-                and cur_lane.extruder_obj is not None
-                and cur_lane.extruder_obj.lane_loaded == cur_lane.name):
+            if in_toolhead:
                 cur_lane.sync_to_extruder()
                 if self.afc.current == cur_lane.name:
                     self.lane_tool_loaded(cur_lane)

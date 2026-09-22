@@ -34,8 +34,9 @@ class AFCCanvasLane(AFCLane):
     DEFAULT_ODOMETER_POLL_INTERVAL = 0.05
     DEFAULT_ODOMETER_LOAD_THRESHOLD = 3
     DEFAULT_EXTRUDER_FEED_CHUNK = 1.0
-    DEFAULT_LOAD_TO_TOOLHEAD_TIMEOUT = 30.0
+    DEFAULT_LOAD_TO_TOOLHEAD_TIMEOUT = 60.0
     DEFAULT_EXTRUDER_FEED_TIMEOUT = 10.0
+    DEFAULT_PREP_CHECK_DISTANCE = 10.0
     DEFAULT_LOAD_ATTEMPTS = 3
     DEFAULT_LOAD_RECOVERY_RETRACT_DISTANCE = 30.0
     DEFAULT_CUTTER_WAIT_TIME = 3.0
@@ -83,6 +84,10 @@ class AFCCanvasLane(AFCLane):
             "load_recovery_retract_distance",
             self.DEFAULT_LOAD_RECOVERY_RETRACT_DISTANCE,
             minval=0.0,
+        )
+        # Distance to move filament back and forth during PREP to verify it moves, 0 disables
+        self.prep_check_distance = config.getfloat(
+            "prep_check_distance", self.DEFAULT_PREP_CHECK_DISTANCE, minval=0.0
         )
         self.odometer_count = 0
         self.last_odometer_eventtime = None
