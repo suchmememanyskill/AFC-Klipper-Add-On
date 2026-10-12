@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+import pytest
+
 from extras.AFC_canvas import afcCanvas
+from extras.AFC_functions import afcFunction
 from extras.AFC_lane import AFCMoveWarning, MoveDirection, SpeedMode, AFCHomingPoints
-from tests.conftest import MockAFC, MockLogger, MockPrinter, MockReactor
+from tests.conftest import MockAFC, MockConfig, MockLogger, MockPrinter, MockReactor
 
 
 def _make_canvas_unit(name="CANVAS_1"):
@@ -188,3 +191,168 @@ def test_system_test_falls_back_to_callback_state_without_prep_endstop():
     assert lane.prep_state is False
     assert lane._load_state is False
     lane.apply_canvas_led.assert_called_with(unit.afc.led_off)
+
+
+@pytest.fixture
+def canvas_unit() -> afcCanvas:
+    afc = MockAFC()
+    printer = MockPrinter(afc=afc)
+    config = MockConfig(name="AFC_canvas CANVAS_1", printer=printer)
+    return afcCanvas(config)
+
+
+@pytest.fixture
+def unsupported_prompt_messages() -> list[tuple[str, str]]:
+    return [
+        ("raw", "// action:prompt_begin CANVAS_1 Calibration"),
+        ("raw", "// action:prompt_text Canvas does not support calibration."),
+        ("raw", "// action:prompt_footer_button Cancel|RESPOND TYPE=command MSG=action:prompt_end"
+         "|warning"),
+        ("raw", "// action:prompt_show"),
+    ]
+
+
+class TestAFCCanvasCmdUnitCalibration:
+    @pytest.mark.parametrize("has_lanes", [False, True])
+    def test_shows_unsupported_prompt(
+        self, canvas_unit: afcCanvas, unsupported_prompt_messages: list[tuple[str, str]],
+        has_lanes: bool,
+    ) -> None:
+        if has_lanes:
+            canvas_unit.lanes["lane1"] = MagicMock()
+
+        canvas_unit.cmd_UNIT_CALIBRATION(MagicMock())
+
+        assert canvas_unit.logger.messages == unsupported_prompt_messages
+        canvas_unit.afc.gcode.run_script_from_command.assert_not_called()
+
+    @pytest.mark.parametrize("command", [
+        "UNIT_CALIBRATION", "UNIT_LANE_CALIBRATION", "UNIT_BOW_CALIBRATION",
+        "AFC_UNIT_TD_ONE_CALIBRATION",
+    ])
+    def test_registered_command_shows_unsupported_prompt(
+        self, canvas_unit: afcCanvas, unsupported_prompt_messages: list[tuple[str, str]],
+        command: str,
+    ) -> None:
+        canvas_unit.gcode.register_mux_command = MagicMock()
+        canvas_unit.afc.td1_defined = True
+        canvas_unit.handle_connect()
+        canvas_unit.handle_moonraker_connect()
+        assert canvas_unit.logo == '<span class=success--text>CANVAS Ready</span>\n'
+        assert canvas_unit.logo_error == '<span class=error--text>CANVAS Not Ready</span>\n'
+        assert canvas_unit.afc.units == {"CANVAS_1": canvas_unit}
+        callbacks = {
+            call.args[0]: call.args[3]
+            for call in canvas_unit.gcode.register_mux_command.call_args_list
+        }
+
+        callbacks[command](MagicMock())
+
+        assert canvas_unit.logger.messages == unsupported_prompt_messages
+        canvas_unit.afc.gcode.run_script_from_command.assert_not_called()
+
+
+class TestAFCCanvasCmdUnitLaneCalibration:
+    def test_shows_unsupported_prompt(
+        self, canvas_unit: afcCanvas, unsupported_prompt_messages: list[tuple[str, str]],
+    ) -> None:
+        canvas_unit.cmd_UNIT_LANE_CALIBRATION(MagicMock())
+
+        assert canvas_unit.logger.messages == unsupported_prompt_messages
+        canvas_unit.afc.gcode.run_script_from_command.assert_not_called()
+
+
+class TestAFCCanvasCmdUnitBowCalibration:
+    def test_shows_unsupported_prompt(
+        self, canvas_unit: afcCanvas, unsupported_prompt_messages: list[tuple[str, str]],
+    ) -> None:
+        canvas_unit.cmd_UNIT_BOW_CALIBRATION(MagicMock())
+
+        assert canvas_unit.logger.messages == unsupported_prompt_messages
+        canvas_unit.afc.gcode.run_script_from_command.assert_not_called()
+
+
+class TestAFCCanvasCmdAFCUnitTDOneCalibration:
+    def test_shows_unsupported_prompt(
+        self, canvas_unit: afcCanvas, unsupported_prompt_messages: list[tuple[str, str]],
+    ) -> None:
+        canvas_unit.cmd_AFC_UNIT_TD_ONE_CALIBRATION(MagicMock())
+
+        assert canvas_unit.logger.messages == unsupported_prompt_messages
+        canvas_unit.afc.gcode.run_script_from_command.assert_not_called()
+
+
+class TestAFCCanvasCalibrateLane:
+    def test_rejects_calibration_without_touching_lane(self, canvas_unit: afcCanvas) -> None:
+        lane = MagicMock()
+
+        result = canvas_unit.calibrate_lane(lane, 5.0)
+
+        assert result == (False, "Canvas does not support calibration.", 0.0)
+        assert lane.mock_calls == []
+        assert canvas_unit.logger.messages == []
+        canvas_unit.afc.gcode.run_script_from_command.assert_not_called()
+
+    @pytest.mark.parametrize("direct_hub", [False, True])
+    @pytest.mark.parametrize("lanes,unit", [("lane1", None), ("all", None), ("all", "CANVAS_1")])
+    def test_shared_calibration_displays_failure_without_moving_filament(
+        self, canvas_unit: afcCanvas, direct_hub: bool, lanes: str, unit: str | None,
+    ) -> None:
+        config = MockConfig(name="AFC_functions", printer=canvas_unit.printer)
+        config.access_tracking = {}
+        functions = afcFunction(config)
+        functions.handle_connect()
+        lane = MagicMock()
+        lane.name = "lane1"
+        lane.unit_obj = canvas_unit
+        lane.extruder_obj.is_standalone.return_value = False
+        lane.load_state = True
+        lane.prep_state = True
+        lane.is_direct_hub.return_value = direct_hub
+        canvas_unit.lanes["lane1"] = lane
+        canvas_unit.afc.lanes["lane1"] = lane
+        canvas_unit.afc.units["CANVAS_1"] = canvas_unit
+
+        result = functions._lane_calibration(lanes, unit, 5.0, 25.0)
+
+        assert result == (False, [], [])
+        assert canvas_unit.logger.messages == [
+            ("info", "Starting AFC distance Calibrations"),
+            ("raw", "// action:prompt_begin AFC Calibration Failed"),
+            ("raw", "// action:prompt_text AFC Calibration Failed for lane1. "),
+            ("raw", "// action:prompt_text Fail message: Canvas does not support calibration."),
+            ("raw", "// action:prompt_footer_button Cancel|RESPOND TYPE=command "
+             "MSG=action:prompt_end|warning"),
+            ("raw", "// action:prompt_show"),
+        ]
+        canvas_unit.afc.error.AFC_error.assert_called_once_with(
+            "Canvas does not support calibration.", False,
+        )
+        lane.move.assert_not_called()
+        lane.move_advanced.assert_not_called()
+        lane.move_with_odometer.assert_not_called()
+        canvas_unit.afc.gcode.run_script_from_command.assert_not_called()
+
+
+class TestAFCCanvasCalibrateBowden:
+    def test_rejects_calibration_without_touching_lane(self, canvas_unit: afcCanvas) -> None:
+        lane = MagicMock()
+
+        result = canvas_unit.calibrate_bowden(lane, 25.0, 5.0)
+
+        assert result == (False, "Canvas does not support calibration.", 0.0)
+        assert lane.mock_calls == []
+        assert canvas_unit.logger.messages == []
+        canvas_unit.afc.gcode.run_script_from_command.assert_not_called()
+
+
+class TestAFCCanvasCalibrateTD1:
+    def test_rejects_calibration_without_touching_lane(self, canvas_unit: afcCanvas) -> None:
+        lane = MagicMock()
+
+        result = canvas_unit.calibrate_td1(lane, 25.0, 5.0)
+
+        assert result == (False, "Canvas does not support calibration.", 0.0)
+        assert lane.mock_calls == []
+        assert canvas_unit.logger.messages == []
+        canvas_unit.afc.gcode.run_script_from_command.assert_not_called()

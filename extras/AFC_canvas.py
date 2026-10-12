@@ -1,8 +1,14 @@
 from __future__ import annotations
 
 import traceback
+from typing import TYPE_CHECKING
 
 import configfile
+
+from extras.AFC_respond import AFCprompt
+
+if TYPE_CHECKING:
+    from gcode import GCodeCommand
 
 CONFIG_ERROR = getattr(configfile, "error", Exception)
 
@@ -18,7 +24,6 @@ except Exception:
 try:
     from extras.AFC_lane import (
         AFCMoveWarning,
-        MoveDirection,
         SpeedMode,
         AFCHomingPoints,
         AFCLane,
@@ -37,6 +42,8 @@ except Exception:
 
 
 class afcCanvas(afcUnit):
+
+    CALIBRATION_UNSUPPORTED = "Canvas does not support calibration."
 
     def __init__(self, config):
         super().__init__(config)
@@ -58,6 +65,35 @@ class afcCanvas(afcUnit):
                 [self.cutter_sensor_pin], self.cutter_callback
             )
 
+    def cmd_UNIT_CALIBRATION(self, gcmd: GCodeCommand) -> None:
+        prompt = AFCprompt(gcmd, self.logger)
+        prompt.create_custom_p(
+            f"{self.name} Calibration", self.CALIBRATION_UNSUPPORTED,
+            cancel=True,
+        )
+
+    def cmd_UNIT_LANE_CALIBRATION(self, gcmd: GCodeCommand) -> None:
+        self.cmd_UNIT_CALIBRATION(gcmd)
+
+    def cmd_UNIT_BOW_CALIBRATION(self, gcmd: GCodeCommand) -> None:
+        self.cmd_UNIT_CALIBRATION(gcmd)
+
+    def cmd_AFC_UNIT_TD_ONE_CALIBRATION(self, gcmd: GCodeCommand) -> None:
+        self.cmd_UNIT_CALIBRATION(gcmd)
+
+    def calibrate_lane(self, cur_lane: AFCLane, tol: float) -> tuple[bool, str, float]:
+        return False, self.CALIBRATION_UNSUPPORTED, 0.0
+
+    def calibrate_bowden(
+        self, cur_lane: AFCLane, dis: float, tol: float,
+    ) -> tuple[bool, str, float]:
+        return False, self.CALIBRATION_UNSUPPORTED, 0.0
+
+    def calibrate_td1(
+        self, cur_lane: AFCLane, dis: float, tol: float,
+    ) -> tuple[bool, str, float]:
+        return False, self.CALIBRATION_UNSUPPORTED, 0.0
+
     def eject_lane(self, lane: AFCLane):
         try:
             getattr(lane, "move_with_odometer")(
@@ -74,7 +110,7 @@ class afcCanvas(afcUnit):
         super().handle_connect()
         self.logo = '<span class=success--text>CANVAS Ready</span>\n'
         self.logo_error = '<span class=error--text>CANVAS Not Ready</span>\n'
-        
+
     def _setup_output_pin(self, config, pin_name):
         if pin_name is None:
             return None
