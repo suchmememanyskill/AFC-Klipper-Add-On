@@ -251,6 +251,15 @@ class afcCanvas(afcUnit):
         assignTcmd: bool,
         enable_movement: bool,
     ) -> bool:
+        """
+        Restore CANVAS lane state and report its tool mappings during PREP.
+
+        :param cur_lane: Lane to initialize from its prep sensor state
+        :param delay: Requested startup delay, unused by CANVAS
+        :param assignTcmd: Whether to assign tool macros before reporting mappings
+        :param enable_movement: Requested movement checks, unused by CANVAS
+        :return type: True when the lane startup checks complete
+        """
         # For now, ignore movement checks
         msg = ""
         succeeded = True
@@ -280,7 +289,7 @@ class afcCanvas(afcUnit):
 
         cur_lane.send_lane_data()
         cur_lane.do_enable(False)
-        self.logger.info(f"{cur_lane.name} tool cmd: {cur_lane.map:3} {msg}")
+        self.logger.info(f"{cur_lane.name} tool cmd: {cur_lane.map_to_string():3} {msg}")
         cur_lane.set_afc_prep_done()
         return succeeded
 

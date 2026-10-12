@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from extras.AFC_canvas import afcCanvas
+from extras.AFC_canvas_lane import AFCCanvasLane
 from extras.AFC_functions import afcFunction
 from extras.AFC_lane import AFCMoveWarning, MoveDirection, SpeedMode, AFCHomingPoints
 from tests.conftest import MockAFC, MockConfig, MockLogger, MockPrinter, MockReactor
@@ -155,7 +156,8 @@ def test_system_test_seeds_load_state_from_pressed_prep_endstop():
     lane._load_state = False
     lane._afc_prep_done = False
     lane.name = "lane1"
-    lane.map = "T0"
+    lane.map = ["T0"]
+    lane.map_to_string.return_value = "T0"
     lane.tool_loaded = False
     lane.send_lane_data = MagicMock()
     lane.do_enable = MagicMock()
@@ -179,7 +181,8 @@ def test_system_test_falls_back_to_callback_state_without_prep_endstop():
     lane._load_state = True
     lane._afc_prep_done = False
     lane.name = "lane1"
-    lane.map = "T0"
+    lane.map = ["T0"]
+    lane.map_to_string.return_value = "T0"
     lane.tool_loaded = False
     lane.send_lane_data = MagicMock()
     lane.do_enable = MagicMock()
@@ -199,6 +202,161 @@ def canvas_unit() -> afcCanvas:
     printer = MockPrinter(afc=afc)
     config = MockConfig(name="AFC_canvas CANVAS_1", printer=printer)
     return afcCanvas(config)
+
+
+@pytest.fixture
+def canvas_system_objects(canvas_unit: afcCanvas) -> tuple[afcCanvas, AFCCanvasLane]:
+    """
+    Build a CANVAS lane with real initialization and mocked hardware dependencies.
+
+    :param canvas_unit: CANVAS unit owning the lane
+    :return type: CANVAS unit and lane for startup tests
+    """
+    printer = canvas_unit.printer
+    printer.objects["AFC_canvas CANVAS_1"] = canvas_unit
+    printer.objects["drv8833 motor"] = MagicMock()
+    config = MockConfig(
+        name="AFC_canvas_lane lane1",
+        printer=printer,
+        values={
+            "unit": "CANVAS_1:1",
+            "drv8833": "motor",
+            "odometer_pin": "PA0",
+            "odometer_resolution": 0.5,
+            "map": ["T0"],
+        },
+    )
+    config.fileconfig.add_section("AFC_canvas CANVAS_1")
+    config.getsection = MagicMock(return_value=MockConfig(
+        name="AFC_canvas CANVAS_1", printer=printer))
+    lane = AFCCanvasLane(config)
+    lane.extruder_obj = MagicMock()
+    lane.extruder_obj.lane_loaded = lane.name
+    lane.sync_to_extruder = MagicMock()
+    lane.send_lane_data = MagicMock()
+    canvas_unit.afc.lanes[lane.name] = lane
+    canvas_unit.lanes[lane.name] = lane
+    assert canvas_unit.logger.messages == []
+    return canvas_unit, lane
+
+
+class TestAFCCanvasSystemTest:
+    @pytest.mark.parametrize("mapping,expected_map", [
+        (["T0"], "T0 "),
+        (["T10", "T2"], "T2, T10"),
+        ([], "NONE"),
+        (["NONE"], "NONE"),
+    ])
+    def test_list_mappings_complete_prep(self, canvas_system_objects, mapping, expected_map):
+        unit, lane = canvas_system_objects
+        lane.map = mapping
+        lane._load_state = True
+
+        result = unit.system_Test(lane, 0.0, False, False)
+
+        assert result is True
+        assert lane.map == mapping
+        assert lane.prep_state is False
+        assert lane._load_state is False
+        assert lane._afc_prep_done is True
+        lane.send_lane_data.assert_called_once_with()
+        lane.canvas_motor.drv8833_set_speed.assert_called_once_with(0.0)
+        unit.function.TcmdAssign.assert_not_called()
+        lane.sync_to_extruder.assert_not_called()
+        assert unit.logger.messages == [
+            ("debug", "lane_unloaded: lane1"),
+            ("info", f"lane1 tool cmd: {expected_map} EMPTY READY FOR SPOOL"),
+        ]
+
+    @pytest.mark.parametrize("tool_loaded,has_extruder,loaded_lane", [
+        (False, True, "lane1"),
+        (True, False, "lane1"),
+        (True, True, "lane2"),
+    ])
+    def test_unconfirmed_tool_load_keeps_lane_ready(
+        self, canvas_system_objects, tool_loaded, has_extruder, loaded_lane,
+    ):
+        unit, lane = canvas_system_objects
+        lane.prep_state = True
+        lane.tool_loaded = tool_loaded
+        if has_extruder:
+            lane.extruder_obj.lane_loaded = loaded_lane
+        else:
+            lane.extruder_obj = None
+
+        result = unit.system_Test(lane, 0.0, False, False)
+
+        assert result is True
+        assert lane.prep_state is True
+        assert lane._load_state is True
+        assert lane._afc_prep_done is True
+        lane.sync_to_extruder.assert_not_called()
+        lane.send_lane_data.assert_called_once_with()
+        lane.canvas_motor.drv8833_set_speed.assert_called_once_with(0.0)
+        assert unit.logger.messages == [
+            ("debug", "lane_loaded: lane1"),
+            ("info", "lane1 tool cmd: T0  FILAMENT PRESENT"),
+        ]
+
+    @pytest.mark.parametrize("current,callback,color", [
+        ("lane1", "lane_tool_loaded", "led_tool_loaded"),
+        ("lane2", "lane_tool_loaded_idle", "led_tool_loaded_idle"),
+    ])
+    def test_restores_loaded_toolhead_state(
+        self, canvas_system_objects, current, callback, color,
+    ):
+        unit, lane = canvas_system_objects
+        lane.prep_state = True
+        lane.tool_loaded = True
+        unit.afc.current = current
+
+        result = unit.system_Test(lane, 0.0, False, True)
+
+        assert result is True
+        assert lane.prep_state is True
+        assert lane._load_state is True
+        assert lane._afc_prep_done is True
+        assert lane.tool_loaded is True
+        lane.sync_to_extruder.assert_called_once_with()
+        lane.extruder_obj.set_status_led.assert_called_once_with(getattr(unit.afc, color))
+        lane.send_lane_data.assert_called_once_with()
+        lane.canvas_motor.drv8833_set_speed.assert_called_once_with(0.0)
+        assert unit.logger.messages == [
+            ("debug", "lane_loaded: lane1"),
+            ("debug", f"{callback}: lane1"),
+            ("info", "lane1 tool cmd: T0  FILAMENT PRESENT in ToolHead"),
+        ]
+
+    def test_assigns_mapping_before_logging(self, canvas_system_objects):
+        unit, lane = canvas_system_objects
+        lane.map = []
+
+        def assign_mapping(cur_lane: AFCCanvasLane) -> None:
+            """
+            Simulate assigning a tool macro during PREP.
+
+            :param cur_lane: Lane receiving the tool mapping
+            """
+            cur_lane.map = ["T2"]
+            cur_lane.current_map = "T2"
+
+        unit.function.TcmdAssign.side_effect = assign_mapping
+
+        result = unit.system_Test(lane, 0.0, True, False)
+
+        assert result is True
+        assert lane.map == ["T2"]
+        assert lane.current_map == "T2"
+        assert lane.prep_state is False
+        assert lane._load_state is False
+        assert lane._afc_prep_done is True
+        unit.function.TcmdAssign.assert_called_once_with(lane)
+        lane.send_lane_data.assert_called_once_with()
+        lane.canvas_motor.drv8833_set_speed.assert_called_once_with(0.0)
+        assert unit.logger.messages == [
+            ("debug", "lane_unloaded: lane1"),
+            ("info", "lane1 tool cmd: T2  EMPTY READY FOR SPOOL"),
+        ]
 
 
 @pytest.fixture
