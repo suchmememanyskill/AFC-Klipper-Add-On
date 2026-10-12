@@ -67,7 +67,7 @@ class AfcToolchanger(afcUnit):
             msg = "<span class=success--text>LOADED</span>"
             msg += cur_lane.extruder_obj.prep_on_shuttle_check(cur_lane)
 
-        self.logger.raw( '{lane_name} tool cmd: {tcmd:3} {msg}'.format(lane_name=cur_lane.name, tcmd=cur_lane.map, msg=msg))
+        self.logger.raw(f'{cur_lane.name} tool cmd: {cur_lane.map_to_string():3} {msg}')
         cur_lane.set_afc_prep_done()
         return True
 
@@ -177,6 +177,8 @@ class AfcToolchanger(afcUnit):
             self.afc.gcode.run_script_from_command(f"{current_extruder.custom_unselect}")
         else:
             self.afc.gcode.run_script_from_command("UNSELECT_TOOL")
+
+        self.afc.function.handle_activate_extruder()
 
         lane_obj = self.afc.function.get_current_lane_obj()
         if lane_obj:

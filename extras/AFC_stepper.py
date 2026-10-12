@@ -24,7 +24,7 @@ try: from extras.AFC_lane import AFCLane, AFCHomingPoints, VALID_DIRECT_HUB
 except: raise error(ERROR_STR.format(import_lib="AFC_lane", trace=traceback.format_exc()))
 
 if TYPE_CHECKING:
-    from toolhead import Toolhead
+    from toolhead import ToolHead
     from stepper import PrinterStepper
     from mcu import MCU_endstop
 
@@ -156,13 +156,15 @@ class AFCExtruderStepper(AFCLane):
         """
         Handles klippy:ready callback, check to see if buffer_obj is a FPS_PSF buffer. If buffer is
         a FPS_PSF buffer then endstops are registered for tool_start, buffer_adv, and buffer_trailing
+        The FPS_PSF buffer is only registered as a tool_start endstop if tool_start is set as buffer.
         """
         super()._handle_ready()
 
         if (self.buffer_obj
             and self.buffer_obj.type == "FPS_PSF"):
-            self._add_endstop('tool_start', None, f'{self.name}_tool_start',
-                              mcu_endstop=self.buffer_obj.fps_endstop)
+            if self.extruder_obj.tool_start == "buffer":
+                self._add_endstop('tool_start', None, f'{self.name}_tool_start',
+                                  mcu_endstop=self.buffer_obj.fps_endstop)
             self._add_endstop('buffer_advance', None, f'{self.name}_buffer_adv',
                               mcu_endstop=self.buffer_obj.fps_endstop)
             self._add_endstop('buffer_trailing', None, f'{self.name}_buffer_trailing',
@@ -404,7 +406,7 @@ class AFCExtruderStepper(AFCLane):
         # Advance internal time to satisfy homing scheduler
         self.next_cmd_time += max(0., delay)
 
-    def _drip_update_time(self, toolhead: Toolhead, max_time: float, drip_completion) -> None:
+    def _drip_update_time(self, toolhead: ToolHead, max_time: float, drip_completion) -> None:
         """
         Helper function for mimicking how klipper toolhead does drip moves
 
@@ -460,7 +462,7 @@ class AFCExtruderStepper(AFCLane):
         dwell_time = self._submit_move( start_time, delta, speed, self._homing_accel)
         max_time = start_time + dwell_time
 
-        toolhead: Toolhead = self.printer.lookup_object('toolhead')
+        toolhead: ToolHead = self.printer.lookup_object('toolhead')
 
         # TODO: add a check for toolhead.drip_update_time and test with https://github.com/KalicoCrew/kalico/pull/825 PR
         if self.motion_queuing is None:
@@ -570,7 +572,11 @@ class AFCExtruderStepper(AFCLane):
         if (hub_pin
             and hub_pin.lower() != "virtual"):
             self._add_endstop('hub', hub_pin, 'hub')
-        if tool_start_pin != 'buffer':
+        if (tool_start_pin is not None
+            and tool_start_pin.lower() == "virtual"):
+            # Virtual toolhead sensor: no hardware pin to register an endstop for
+            pass
+        elif tool_start_pin != 'buffer':
             self._add_endstop('tool_start', tool_start_pin, 'tool_start')
         else:
             if buffer_adv_pin is not None:
@@ -692,7 +698,7 @@ class AFCExtruderStepper(AFCLane):
         self.logger.debug(f"{self.name} adding endstop {key}:{name}:{pin}") # TODO:remove once fully tested on toolchanger
         self._endstops[key] = (mcu_endstop, name)
 
-    def do_homing_move(self, movepos: int, speed: int, accel: int, endstop_spec:str,
+    def do_homing_move(self, movepos: float, speed: float, accel: float, endstop_spec:str,
                        triggered=True, check_trigger=True, assist_active=True) -> tuple[bool, float]:
         """
         Perform's a homing move using the specified endstop, speed/accel and distance.

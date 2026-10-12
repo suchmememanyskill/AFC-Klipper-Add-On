@@ -13,11 +13,13 @@
    surrounding file's conventions rather than imposing a different style.
 - **Correct typing** — including things like `Optional[float]` instead of
    `float = None`. Methods should be fully annotated (parameters and return
-   type). Local variables and attributes only need an explicit annotation
-   when a linter/type checker (e.g. mypy) can't infer the type on its own —
-   for example an attribute first assigned `None` and later assigned a
-   concrete type elsewhere, or an empty `{}`/`[]` whose element type isn't
-   obvious from that line alone.
+   type). This applies to actual code (`extras/*.py` and similar); unit test
+   methods may be annotated too, but it's optional there, not required.
+   Local variables and attributes only need an explicit annotation when a
+   linter/type checker (e.g. mypy) can't infer the type on its own — for
+   example an attribute first assigned `None` and later assigned a concrete
+   type elsewhere, or an empty `{}`/`[]` whose element type isn't obvious
+   from that line alone.
 - **Use f-strings, not `str.format()`** — `f"Lane {self.name}"` rather than
    `"Lane {}".format(self.name)`.
 - **Format error/exception strings before raising, not inline** — build the
@@ -35,6 +37,11 @@
 - **Keep comments short and succinct** — a sentence or two at most. Comments
    still need to make sense to the developer reading them, just don't let
    them turn into paragraphs.
+- **No em-dashes.** Use a period, comma, or colon instead when breaking up a
+   clause, in comments, docstrings, commit messages, or any other prose. This
+   applies to new code and documentation, and to existing documentation while
+   it's being edited (clean up any em-dashes in a doc you're already touching,
+   but don't go sweep unrelated files just for this).
 - **Docstrings** — every new or changed method needs a docstring matching
    Sphinx-style convention in this shape: a short description, a blank line,
    then one `:param name:` per parameter (skip `self`) and a `:return type:`
@@ -128,9 +135,7 @@
 - **No `__new__` bypass for construction** — build test objects through the
    real `__init__` (mocking dependencies like config/printer/reactor as
    needed), rather than using `SomeClass.__new__(SomeClass)` and hand-setting
-   attributes to skip constructor logic entirely. This applies to new tests
-   even in a file where older tests already use `__new__` — don't migrate
-   the untouched older tests to match unless asked.
+   attributes to skip constructor logic entirely.
 - **Assertions must actually distinguish the branch under test** — an
    assertion has to be something that would be *false* if the code had
    taken the other branch, not just something that happens to be true
@@ -162,3 +167,12 @@
 These apply together — for example, a test written to satisfy the
 multi-condition independence rule still has to satisfy the class-variable,
 logging, and branch-coverage rules for that same test.
+
+# Pull Request Rules
+
+- **AI/LLMs must not write the PR description.** The user has to fill out
+   `.github/pull_request_template.md` themselves, in their own words, matching
+   the template's sections and checklist. Do not draft, generate, or rewrite
+   a PR title/description on their behalf, even if asked to summarize the
+   changes for them to use elsewhere, that summary is not a substitute for
+   the user completing the template.

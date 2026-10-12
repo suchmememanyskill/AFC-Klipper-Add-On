@@ -47,7 +47,10 @@ def _make_buffer(name="TN", error_sensitivity=0.0):
 
     afc = MockAFC()
     printer = MockPrinter(afc=afc)
-    config = MockConfig(name="AFC_buffer {}".format(name), printer=printer, values={})
+    # advance_pin/trailing_pin have no config.get(...) default; real Klipper
+    # requires them whenever type == "switched" (the default type here).
+    config = MockConfig(name="AFC_buffer {}".format(name), printer=printer,
+                        values={"advance_pin": "PA0", "trailing_pin": "PA1"})
     with patch("extras.AFC_buffer.add_filament_switch",
                return_value=(MagicMock(), MagicMock())):
         buf = AFCBuffer(config)
@@ -98,7 +101,7 @@ def _make_fps_buffer(name="FPS_buffer1", **overrides):
     printer = MockPrinter(afc=afc)
     printer.lookup_object("pins").setup_pin = MagicMock(return_value=MagicMock())
     config = MockConfig(name="AFC_FPS {}".format(name), printer=printer,
-                        values={"type": "FPS_PSF"})
+                        values={"type": "FPS_PSF", "adc_pin": "PA5"})
     buf = AFCFPSBuffer(config)
     reactor = buf.reactor  # alias -- buf.reactor is afc.reactor from real construction
 
@@ -180,15 +183,13 @@ def _make_fps_buffer(name="FPS_buffer1", **overrides):
     return buf, afc, reactor, printer
 
 def _make_gcmd(values=None, floats=None):
-    """General-purpose gcmd mock: gcmd.get(key) / gcmd.get_float(key) pull
-    from the given dicts, falling back to the provided default arg."""
-    values = values or {}
-    floats = floats or {}
-    gcmd = MagicMock()
-    gcmd.get = MagicMock(side_effect=lambda k, default=None: values.get(k, default))
-    gcmd.get_float = MagicMock(side_effect=lambda k, default=None, **kw: floats.get(k, default))
-    gcmd.error = MagicMock(side_effect=lambda msg: Exception(msg))
-    return gcmd
+    """General-purpose gcmd mock backed by MockGCodeCommand: values/floats
+    are merged into one params dict, mirroring real Klipper's single
+    underlying params dict (get()/get_float() differ only in how they parse
+    the same stored value, not in where it comes from)."""
+    from tests.conftest import MockGCodeCommand
+    params = {**(values or {}), **(floats or {})}
+    return MockGCodeCommand(params=params)
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -196,12 +197,23 @@ def _build_real_buffer(values=None):
     """Construct a real AFCBuffer via __init__ (not the attribute-bypass
     helper), for exercising __init__'s own logic. add_filament_switch does
     real Klipper config-object wiring that isn't worth reproducing under
-    test, so it's patched out."""
+    test, so it's patched out.
+
+    advance_pin/trailing_pin have no config.get(...) default, so real
+    Klipper requires them whenever type == "switched" (the default type);
+    supplied here so the default construction path succeeds the same way a
+    real, valid user config would. Callers testing a non-"switched" type can
+    still omit them via values={"type": ...}.
+    """
     from tests.conftest import MockConfig, MockPrinter, MockAFC
+
+    all_values = {"advance_pin": "PA0", "trailing_pin": "PA1"}
+    if values:
+        all_values.update(values)
 
     afc = MockAFC()
     printer = MockPrinter(afc=afc)
-    config = MockConfig(name="AFC_buffer TN", printer=printer, values=values or {})
+    config = MockConfig(name="AFC_buffer TN", printer=printer, values=all_values)
     with patch("extras.AFC_buffer.add_filament_switch",
                return_value=(MagicMock(), MagicMock())):
         buf = AFCBuffer(config)
@@ -232,7 +244,11 @@ class TestAFCBufferInit:
         assert buf.fault_timer is None
         assert buf.min_event_systime == buf.reactor.NEVER
         assert buf.led is False
-        assert buf.advance_pin is None
+        # advance_pin/trailing_pin have no config default and are required
+        # whenever type == "switched" (the default type); _build_real_buffer
+        # supplies them the same way a valid real config would.
+        assert buf.advance_pin == "PA0"
+        assert buf.trailing_pin == "PA1"
         assert buf.buffer_distance is None
 
     def test_registers_ready_event_handler(self):
@@ -280,7 +296,8 @@ class TestAFCBufferInit:
         afc = MockAFC()
         afc.function = MagicMock()
         printer = MockPrinter(afc=afc)
-        config = MockConfig(name="AFC_buffer TN", printer=printer, values={})
+        config = MockConfig(name="AFC_buffer TN", printer=printer,
+                            values={"advance_pin": "PA0", "trailing_pin": "PA1"})
         with patch("extras.AFC_buffer.add_filament_switch",
                    return_value=(MagicMock(), MagicMock())):
             buf = AFCBuffer(config)
@@ -339,7 +356,8 @@ class TestAFCBufferInit:
         afc = MockAFC()
         afc.enable_sensors_in_gui = True
         printer = MockPrinter(afc=afc)
-        config = MockConfig(name="AFC_buffer TN", printer=printer, values={})
+        config = MockConfig(name="AFC_buffer TN", printer=printer,
+                            values={"advance_pin": "PA0", "trailing_pin": "PA1"})
         with patch("extras.AFC_buffer.add_filament_switch",
                    return_value=(MagicMock(), MagicMock())):
             buf = AFCBuffer(config)
@@ -354,7 +372,8 @@ class TestAFCBufferInit:
         afc = MockAFC()
         afc.gcode.register_mux_command = MagicMock(wraps=afc.gcode.register_mux_command)
         printer = MockPrinter(afc=afc)
-        config = MockConfig(name="AFC_buffer TN", printer=printer, values={})
+        config = MockConfig(name="AFC_buffer TN", printer=printer,
+                            values={"advance_pin": "PA0", "trailing_pin": "PA1"})
         with patch("extras.AFC_buffer.add_filament_switch",
                    return_value=(MagicMock(), MagicMock())):
             AFCBuffer(config)
@@ -1628,8 +1647,7 @@ class TestCmdEnableBuffer:
         """cmd_ENABLE_BUFFER should call enable_buffer() exactly once."""
         buf = _make_buffer()
         lane = _make_lane(buf)
-        gcmd = MagicMock()
-        gcmd.get.return_value = "lane1"
+        gcmd = _make_gcmd({"LANE": "lane1"})
         buf.enable_buffer = MagicMock()
         buf.cmd_ENABLE_BUFFER(gcmd)
         buf.enable_buffer.assert_called_once()
@@ -1639,17 +1657,14 @@ class TestCmdEnableBuffer:
         buf = _make_buffer()
         lane = _make_lane(buf)
         buf.set_multiplier = MagicMock()
-        gcmd = MagicMock()
-        gcmd.get.return_value = "lane1"
+        gcmd = _make_gcmd({"LANE": "lane1"})
         buf.cmd_ENABLE_BUFFER(gcmd)
         assert buf.enable is True
         assert buf.current_lane == lane
 
     def test_unassigned_lane_raises_gcmd_error(self):
         buf = _make_buffer()
-        gcmd = MagicMock()
-        gcmd.get.return_value = "not_a_real_lane"
-        gcmd.error = MagicMock(side_effect=lambda msg: Exception(msg))
+        gcmd = _make_gcmd({"LANE": "not_a_real_lane"})
         with pytest.raises(Exception, match="not_a_real_lane not assigned"):
             buf.cmd_ENABLE_BUFFER(gcmd)
 
@@ -1680,10 +1695,9 @@ class TestCmdDisableBuffer:
 # ── cmd_AFC_SET_ERROR_SENSITIVITY ─────────────────────────────────────────────
 
 def _gcmd(sensitivity):
-    """Return a mock gcmd whose get_float returns the given sensitivity."""
-    gcmd = MagicMock()
-    gcmd.get_float.return_value = sensitivity
-    return gcmd
+    """Return a mock gcmd whose get_float('SENSITIVITY', ...) returns the
+    given sensitivity."""
+    return _make_gcmd(floats={"SENSITIVITY": sensitivity})
 
 
 class TestCmdSetErrorSensitivity:
@@ -2986,7 +3000,7 @@ def _build_real_fps_buffer(values=None, adc=None):
     printer = MockPrinter(afc=afc)
     adc = adc if adc is not None else _FakeADC()
     printer.lookup_object("pins").setup_pin = MagicMock(return_value=adc)
-    merged = {"type": "FPS_PSF"}
+    merged = {"type": "FPS_PSF", "adc_pin": "PA5"}
     merged.update(values or {})
     config = MockConfig(name="AFC_FPS FPS1", printer=printer, values=merged)
     buf = AFCFPSBuffer(config)
@@ -3089,7 +3103,8 @@ class TestAFCFPSBufferInit:
         afc.gcode.register_mux_command = MagicMock(wraps=afc.gcode.register_mux_command)
         printer = MockPrinter(afc=afc)
         printer.lookup_object("pins").setup_pin = MagicMock(return_value=_FakeADC())
-        config = MockConfig(name="AFC_FPS FPS1", printer=printer, values={"type": "FPS_PSF"})
+        config = MockConfig(name="AFC_FPS FPS1", printer=printer,
+                            values={"type": "FPS_PSF", "adc_pin": "PA5"})
         AFCFPSBuffer(config)
         names = [c[0][0] for c in afc.gcode.register_mux_command.call_args_list]
         assert "AFC_SET_FPS_SET_POINT" in names
@@ -3242,7 +3257,7 @@ class TestFPSEnableBuffer:
         lane.extruder_obj = MagicMock(th_extruder_name="extruder")
         buf._lane_has_rotation_control = MagicMock(return_value=True)
         buf.fault_detection_enabled = MagicMock(return_value=False)
-        buf._saved_multipliers["extruder"] = ("some_other_lane", 1.08)
+        buf._saved_multipliers[("extruder", lane.name)] = ("some_other_lane", 1.08)
         buf.set_multiplier = MagicMock()
         buf._last_multiplier = 99.0
         buf.enable_buffer(lane)
@@ -3255,10 +3270,12 @@ class TestFPSEnableBuffer:
         lane.extruder_obj = MagicMock(th_extruder_name="extruder")
         buf._lane_has_rotation_control = MagicMock(return_value=True)
         buf.fault_detection_enabled = MagicMock(return_value=False)
-        buf._saved_multipliers["extruder"] = (lane.name, 1.0)
+        buf._saved_multipliers[("extruder", lane.name)] = (lane.name, 1.0)
         buf.set_multiplier = MagicMock()
+        buf._last_multiplier = 99.0
         buf.enable_buffer(lane)
         buf.set_multiplier.assert_not_called()
+        assert buf._last_multiplier == 1.0
 
     def test_has_stepper_with_fault_detection_starts_it(self):
         buf, afc, reactor, printer = _make_fps_buffer()
@@ -3934,7 +3951,8 @@ class TestLoadConfigPrefix:
         from tests.conftest import MockConfig, MockPrinter, MockAFC
         afc = MockAFC()
         printer = MockPrinter(afc=afc)
-        config = MockConfig(name="AFC_buffer TN", printer=printer, values={})
+        config = MockConfig(name="AFC_buffer TN", printer=printer,
+                            values={"advance_pin": "PA0", "trailing_pin": "PA1"})
         with patch("extras.AFC_buffer.add_filament_switch",
                    return_value=(MagicMock(), MagicMock())):
             result = load_config_prefix(config)
@@ -3946,7 +3964,8 @@ class TestLoadConfigPrefix:
         afc = MockAFC()
         printer = MockPrinter(afc=afc)
         printer.lookup_object("pins").setup_pin = MagicMock(return_value=_FakeADC())
-        config = MockConfig(name="AFC_FPS FPS1", printer=printer, values={"type": "FPS_PSF"})
+        config = MockConfig(name="AFC_FPS FPS1", printer=printer,
+                            values={"type": "FPS_PSF", "adc_pin": "PA5"})
         result = load_config_prefix(config)
         assert isinstance(result, AFCFPSBuffer)
 

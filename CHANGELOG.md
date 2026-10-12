@@ -5,6 +5,113 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [09-12-2026]
+### Fixed
+- The `install-afc.sh` script will now properly enumerate additional unit installs.
+- The `install-afc.sh` script will now prompt for buffer selection on additional units.
+### Added
+- New `pin_tool_start: virtual` option for `[AFC_extruder]` sections: creates a virtual toolhead sensor for standalone toolchanger toolheads that have no physical sensor (closes #810).
+- Added `standalone_auto_load_unload` variable to AFC and AFC_extruder configs so users can bypass the automated load for standalone lanes for both toolheads that have a sensor and virtual sensors. When this is disabled user will have to still manually load filament into the toolheads gears/hotend.
+
+## [09-10-2026]
+### Fixed
+- Disabled ooze prevention by default, this was originally meant for toolchangers. But with a recent klipperscreen update, klipperscreen now sends tool number(T) when setting temperature for single toolhead printers and AFC does not set temp because this was defaulted as enabled.
+
+## [09-04-2026]
+### Fixed
+- Fixed an issue where the `AFC_TEST_LANES` macro would potentially call the wrong PARK macro if a custom macro was
+  defined by the user.
+
+## [09-03-2026]
+### Fixed
+- Setting `remember_spool` to `False` will now actually set it to `False`.
+
+## [08-31-2026]
+### Fixed
+- `install-afc.sh` / `update-afc.sh` now resolve the add-on directory from the script's own
+  location (`SCRIPT_DIR`) instead of assuming `~/AFC-Klipper-Add-On`. 
+- The Moonraker `[update_manager afc-software]` block is now written with the actual add-on path
+  rather than a hardcoded `~/AFC-Klipper-Add-On`.
+- `install-afc.sh` no longer ignores the `-m` (Moonraker config path) flag.
+
+## [2026-08-23]
+### Added:
+- Added thread for writing vars to file so that slow disks don't have a chance to block on writes which could cause timer too close errors.
+- Added thread for communicating with moonraker, converted most of the call to moonraker to be asynchronous so that AFC does not block klippers main reactor thread. Left some calls during start up sychronous and the calls for TD-1 when calibrating.
+
+### Fixed
+- AFC no longer crashes with `AttributeError: 'GCodeMove' object has no attribute 'absolute_extrude'` during tool changes on current Klipper master builds. Klipper renamed the `absolute_extrude` attribute to `allow_absolute_extrude` (v0.13.0-741 and newer); AFC now reads and restores whichever attribute name the host provides, so it keeps working on older and newer Klipper alike.
+
+## [2026-08-22]
+### Added
+- Lane and extruder status LEDs can now overlay a `SET_LED_EFFECT` animation on top of the usual
+  static color. Define a `led_effect <lane_or_extruder_name>_<state>` object and it's triggered
+  automatically when that lane/extruder reaches the matching state. Only that lane/extruder's
+  own effect is stopped on the next state change, and re-applying an unchanged state is now a
+  no-op. Nothing changes for lanes without a matching effect defined.
+- Added `templates/led_effects_examples.cfg` with example configs for the feature above.
+
+### Fixed
+- A few status LED updates (toolchanger tool-select, ViViD calibration, lane fault) now go through
+  the same lane LED methods as everything else, so they pick up effects/colors consistently too.
+
+## [2026-08-15]
+### Breaking Change
+- `RESET_AFC_MAPPING` has now been renamed to `AFC_RESET_MAPPING`
+
+### Added
+- Ability to map multiple T(n) macros to a single lane. New `AFC_ADD_MAPPING` and
+  `AFC_REMOVE_MAPPING` macros add/remove T(n) mappings on a lane, and `AFC_ENABLE_MULTIPLE_MAPPING`
+  turns the feature on (existing single-mapping behavior is unchanged until enabled).
+- Added `AFC_SWAP_MAPPING` macro to swap T(n) mappings between two lanes. Infinite spool runout now
+  uses this to move a lane's mappings to the runout lane automatically.
+- `lane_data` records now carry `vendor_name`, `name` and `initial_weight`, and a lane's status reports
+  `spool_vendor`. AFC already fetched all three during a Spoolman lookup but never published them, so
+  anything reading `lane_data` could see a lane's material but not its brand. A slicer can now match a
+  lane to a brand-specific filament preset instead of falling back to the generic preset for that
+  material type (#808).
+
+### Fixed
+- `AFC_RESET_MAPPING` now renumbers T(n) mappings sequentially instead of reusing old numbers, so
+  removing a unit no longer leaves gaps or stale high-numbered mappings behind. Newly assigned
+  commands are now also re-registered with Klipper.
+- `lane_data` sent to Moonraker is now keyed per T(n) mapping instead of per lane name, fixing
+  OrcaSlicer picking up duplicate or incorrect filament data when multiple T(n) macros map to
+  one lane.
+- Fixed T(n) macro renaming so a command manually assigned in the config is still renamed
+  correctly after it's moved to a different lane via a swap or multimapping.
+
+## [2026-08-13]
+### Fixed
+- `LANE_UNLOAD` now reports its refusals as warnings instead of console-only messages, so they reach
+  the message queue and show up in Mainsail/Fluidd and other clients. Previously, ejecting a lane that
+  was loaded in the toolhead logged to the console only, and a standalone extruder with no lane loaded
+  logged nothing at all - in both cases the command returned normally, so a UI could not tell a refused
+  eject from a completed one.
+
+## [2026-08-09]
+### Fixed
+- Fixed a "Timer too close" MCU shutdown that could occur when the PREP sensor releases while a
+  load cycle is still in progress on the same or another lane (Fixing Issue #826).
+
+## [2026-08-07]
+### Added
+- Ability to adjust HTLF selector after lane selection by adding `selector_cal_distance` variable in each lane.
+
+## [2026-08-06]
+### Added
+- Added a `_AFC_DISPLAY_STATUS` hook, called around `TOOL_LOAD`/`TOOL_UNLOAD` with `pushing`/`retraction`
+  state changes. Lets any display integration (e.g. a KNOMI screen) show a live animation during those
+  actions instead of a generic "printing" icon, by defining a `_AFC_DISPLAY_STATUS` gcode_macro. No-ops
+  completely if that macro isn't defined.
+- Added ability to keep track when errors happen during load/unloading processes.
+### Fixed
+- Issues with lanes printing out of order when running AFC_STATS, also updated formatting to be more consistent.
+
+## [2026-08-02]
+### Updated
+- The `BT_LANE_EJECT`, `BT_LANE_MOVE`, and `BT_CHANGE_TOOL` macros will now accept either a lane defined as `lane1` or
+  just a numeric indication of the lane such as `1`. 
 ## [2026-07-26]
 ### Fixed
 - Fixed issue 804 by exposing AFC_VERSION to `afc/status` and AFC object endpoints for moonraker

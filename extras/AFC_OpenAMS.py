@@ -1,6 +1,6 @@
-# AFCProject Automated Filament Changer
+# AFCProject Automated Filament Changer Software
 #
-# Copyright (C) 2024-2026 AFCProject
+# Copyright (C) 2026 AFCProject
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 
@@ -1480,14 +1480,14 @@ class afcAMS(afcUnit):
             else:
                 if not cur_lane.remember_spool:
                     self.afc.spool.clear_values(cur_lane)
-                self.afc.function.afc_led(cur_lane.led_not_ready, cur_lane.led_index)
+                cur_lane.unit_obj.lane_not_ready(cur_lane)
                 msg += 'EMPTY READY FOR SPOOL'
 
         if assignTcmd:
             self.afc.function.TcmdAssign(cur_lane)
         cur_lane.do_enable(False)
         self.logger.info('{lane_name} tool cmd: {tcmd:3} {msg}'.format(
-            lane_name=cur_lane.name, tcmd=cur_lane.map, msg=msg))
+            lane_name=cur_lane.name, tcmd=cur_lane.map_to_string(), msg=msg))
         cur_lane.set_afc_prep_done()
         return succeeded
 
@@ -2296,7 +2296,7 @@ class afcAMS(afcUnit):
             f"Same-FPS infinite runout: {source_name} -> {target_name}")
 
         source_lane.status = AFCLaneState.NONE
-        self.lane_not_ready(source_lane)
+        self.lane_unloaded(source_lane)
 
         try:
             success = self._oams_load(target_lane)
@@ -2311,12 +2311,7 @@ class afcAMS(afcUnit):
                 f"Same-FPS reload failed for {target_name}: {e}", pause=True)
             return False
 
-        source_map = getattr(source_lane, 'map', None)
-        if source_map:
-            self.gcode.run_script_from_command(
-                f'SET_MAP LANE={target_name} MAP={source_map}')
-            self.logger.info(
-                f"Remapped {source_map} from {source_name} to {target_name}")
+        self.gcode.run_script_from_command(f'AFC_SWAP_MAPPING FROM={source_name} TO={target_name}')
 
         target_lane.set_tool_loaded()
         self.lane_tool_loaded(target_lane)
@@ -2361,7 +2356,7 @@ class afcAMS(afcUnit):
 
         if not runout_lane_name:
             lane.status = AFCLaneState.NONE
-            self.lane_not_ready(lane)
+            self.lane_unloaded(lane)
             self.afc.error.AFC_error(
                 f"Runout detected on OAMS {lane.name}. "
                 f"No runout lane configured.\n"
@@ -2373,7 +2368,7 @@ class afcAMS(afcUnit):
         target_lane = self._resolve_lane_reference(runout_lane_name)
         if target_lane is None:
             lane.status = AFCLaneState.NONE
-            self.lane_not_ready(lane)
+            self.lane_unloaded(lane)
             self.afc.error.AFC_error(
                 f"Runout on OAMS {lane.name}: "
                 f"runout lane '{runout_lane_name}' not found",
@@ -2428,7 +2423,7 @@ class afcAMS(afcUnit):
                 pass
             del self._pending_spool_loaded_timers[lane.name]
         lane.loaded_to_hub = False
-        self.lane_unloaded(lane)
+        self.lane_not_ready(lane)
         spool_index = self._spool_map.get(lane.name)
         if spool_index is not None:
             hw = AMSHardwareService.for_printer(self.printer, self.oams_name, logger=self.logger)

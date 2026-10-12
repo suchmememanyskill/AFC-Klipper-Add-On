@@ -25,12 +25,13 @@ from typing import TYPE_CHECKING, Union, Optional, Any, List
 
 if TYPE_CHECKING:
     from extras.AFC import afc
-    from AFC_logger import AFC_logger
+    from extras.AFC_logger import AFC_logger
     from extras.AFC_lane import AFCLane
     from extras.AFC_extruder import AFCExtruder
     from extras.AFC_stepper import AFCExtruderStepper
     from extras.AFC_hub import afc_hub
     from gcode import GCodeCommand
+    from extras.gcode_move import GCodeMove
 
 try: from extras.AFC_utils import ERROR_STR
 except: raise error("Error when trying to import AFC_utils.ERROR_STR\n{trace}".format(trace=traceback.format_exc()))
@@ -63,6 +64,40 @@ def round_floats(value: Any, digits: int = 6) -> Any:
         return [round_floats(v, digits) for v in value]
     return value
 
+
+def get_gcode_absolute_extrude(gcode_move: GCodeMove) -> bool:
+    """
+    Read Klipper GCodeMove absolute-extrude state.
+
+    Klipper PR 7349(v0.13.0-741) renamed the internal attribute from absolute_extrude to
+    allow_absolute_extrude.
+
+    :param gcode_move: Klipper gcode_move object
+    :return bool: Current absolute-extrude flag
+    """
+    if hasattr(gcode_move, "allow_absolute_extrude"):
+        return gcode_move.allow_absolute_extrude
+    return getattr(gcode_move, "absolute_extrude", True)
+
+
+def set_gcode_absolute_extrude(gcode_move: GCodeMove, value: bool) -> None:
+    """
+    Write Klipper GCodeMove absolute-extrude state.
+
+    Sets allow_absolute_extrude on post-PR-7349 Klipper and absolute_extrude
+    on older Klipper (hasattr / getattr compatibility).
+
+    :param gcode_move: Klipper gcode_move object
+    :param value: Absolute-extrude flag to restore
+    """
+    has_new = hasattr(gcode_move, "allow_absolute_extrude")
+    has_old = hasattr(gcode_move, "absolute_extrude")
+    # New name present, or old name missing: write the post-7349 attribute.
+    if has_new or not has_old:
+        gcode_move.allow_absolute_extrude = value
+    # Old name present, or new name missing: write the legacy attribute.
+    if has_old or not has_new:
+        gcode_move.absolute_extrude = value
 
 def load_config(config):
     return afcFunction(config)
@@ -243,7 +278,28 @@ class afcFunction:
         msg +='\n<span class=info--text>Key {} not found in section {} added to AFC_auto_vars.cfg file</span>'.format(rawkey, rawsection)
         self.logger.info(msg)
 
-    def TcmdAssign(self, cur_lane):
+    def register_tool_macro(self, lane_name: str, tool_command:str, rename_map: str="") -> None:
+        """
+        Helper method for registering T(n) macros into klipper
+
+        :param lane_name: Lane name when trying to register T(n) macro, this is only used when
+            an error has occurred and logs lane with T(n) macro
+        :param tool_command: T(n) macro to register
+        :param rename: When a non-empty string is supplied, this method calls _rename with this name
+            instead of calling gcode.register_command
+        """
+        try:
+            if rename_map:
+                self._rename(tool_command, rename_map, self.afc.cmd_CHANGE_TOOL,
+                             self.afc.cmd_CHANGE_TOOL_help)
+            else:
+                self.afc.gcode.register_command(tool_command, self.afc.cmd_CHANGE_TOOL,
+                                                desc=self.afc.cmd_CHANGE_TOOL_help)
+        except Exception:
+            self.logger.error((f"Error trying to map lane {lane_name} to {tool_command}, "
+                               f"please make sure there are no macros already setup for {tool_command}"))
+
+    def TcmdAssign(self, cur_lane: AFCLane) -> None:
         """
         Function automatically tries to generate T(n) macros for lanes. If user has already assigned mapping to `map`
         variable in their configs, this is used instead of an auto assigned command. Before assigning command, checks
@@ -254,30 +310,42 @@ class afcFunction:
 
         :param cur_lane: Lane to assign auto generated T(n) macro
         """
-        if cur_lane.map is None:
+        if not cur_lane.map:
             for x in range(99):
                 cmd = 'T{}'.format(x)
                 # Checking to see if cmd exists in lanes that have manually assigned mapping
                 # skip cmd and generate next if cmd is manually assigned by user
-                manually_assigned = any( cmd == lane._map for lane in self.afc.lanes.values() )
-                if not manually_assigned and cmd not in self.afc.tool_cmds:
+                manually_assigned = any( cmd in (lane._map or []) for lane in self.afc.lanes.values() )
+                if (not manually_assigned and
+                    cmd not in self.afc.tool_cmds):
                     # Checking if macro already exists, generate next valid cmd if current generated cmd exists
                     existing = False
                     if not self.afc.force_assign_map:
                         existing = self.afc.gcode.ready_gcode_handlers.get(cmd)
                     if not existing:
-                        cur_lane._map = cur_lane.map = cmd
+                        # Reassigning (not appending in place) so Klipper's
+                        # status diff sees a new list and pushes the update
+                        cur_lane.map = cur_lane.map + [cmd]
                         break
-        self.afc.tool_cmds[cur_lane.map]=cur_lane.name
-        try:
-            if (cur_lane._map
-                or self.afc.force_assign_map):
-                rename_map = ("_{}".format(cur_lane.map))
-                self._rename(cur_lane.map, rename_map, self.afc.cmd_CHANGE_TOOL, self.afc.cmd_CHANGE_TOOL_help)
-            else:
-                self.afc.gcode.register_command(cur_lane.map, self.afc.cmd_CHANGE_TOOL, desc=self.afc.cmd_CHANGE_TOOL_help)
-        except:
-                self.logger.error("Error trying to map lane {lane} to {tool_macro}, please make sure there are no macros already setup for {tool_macro}".format(lane=[cur_lane.name], tool_macro=cur_lane.map), )
+
+        # Renaming is needed if one of this lane's current T(n) commands was manually
+        # assigned to a lane in the config, even if that assignment now lives on a
+        # different lane (e.g. after a swap or multimapping reassignment).
+        # Only place this will fail is if a AFC_extruder has a mapping but is not a standalone lane,
+        # if this is the case then force_assign_map needs to be set to true in the users AFC config.
+        use_rename = (self.afc.force_assign_map
+                      or any(m in (lane._map or []) for lane in self.afc.lanes.values()
+                             for m in cur_lane.map))
+        for map_str in cur_lane.map:
+            if map_str == "NONE":
+                continue
+            self.afc.tool_cmds.update({map_str: cur_lane.name})
+            # Set first T(n) macro to current map if its not already set
+            if not cur_lane.current_map:
+                cur_lane.current_map = map_str
+            rename_map = f"_{map_str}" if use_rename else ""
+            self.register_tool_macro(cur_lane.name, map_str, rename_map)
+
         self.afc.save_vars()
 
     def check_macro_present(self, macro_name):
@@ -325,16 +393,22 @@ class afcFunction:
         else:
             return True
 
-    def is_homed(self):
+    def is_homed(self, for_move: bool=False) -> bool:
         """
         Helper function to determine if printer is currently homed
 
+        :param for_move: True if the check is guarding a move, always returning hardware state
         :return boolean: True if xyz is homed
         """
         curtime = self.afc.reactor.monotonic()
         kin_status = self.afc.toolhead.get_kinematics().get_status(curtime)
-        if ('x' not in kin_status['homed_axes'] or 'y' not in kin_status['homed_axes'] or 'z' not in kin_status['homed_axes']) and \
-            not self.afc.disable_homing_check:
+        # Always return real homed status if the check is explicitly guarding a move,
+        # or if homing_check is not disabled in the config
+        homing_check = for_move or not self.afc.disable_homing_check
+        if (homing_check and
+            ('x' not in kin_status['homed_axes']
+            or 'y' not in kin_status['homed_axes']
+            or 'z' not in kin_status['homed_axes'])):
             return False
         else:
             return True
@@ -582,7 +656,7 @@ class afcFunction:
                     else:
                         obj.unit_obj.lane_loaded(obj)
                 else:
-                    obj.unit_obj.lane_unloaded(obj)
+                    obj.unit_obj.lane_not_ready(obj)
 
         # Exit early if lane is None
         if cur_lane_loaded is None:
@@ -639,7 +713,7 @@ class afcFunction:
         msg += f" speed_factor: {round_floats(self.afc.gcode_move.speed_factor)}"
         msg += f" extrude_factor: {round_floats(self.afc.gcode_move.extrude_factor)}"
         msg += f" absolute_coord: {self.afc.gcode_move.absolute_coord}"
-        msg += f" absolute_extrude: {self.afc.gcode_move.absolute_extrude}\n"
+        msg += f" absolute_extrude: {get_gcode_absolute_extrude(self.afc.gcode_move)}\n"
         self.logger.debug(msg, only_debug=True)
 
     def check_absolute_mode( self, func_name:str="" ):
@@ -655,9 +729,9 @@ class afcFunction:
         if not self.afc.gcode_move.absolute_coord:
             self.logger.debug("Printer coords not in absolute mode, setting to absolute mode")
             self.afc.gcode_move.absolute_coord = True
-        if not self.afc.gcode_move.absolute_extrude:
+        if not get_gcode_absolute_extrude(self.afc.gcode_move):
             self.logger.debug("Printer extruder not in absolute mode, setting to absolute mode")
-            self.afc.gcode_move.absolute_extrude = True
+            set_gcode_absolute_extrude(self.afc.gcode_move, True)
 
     def get_extruder_pos(self, eventtime=None, past_extruder_position=None, extruder=None):
         """
@@ -721,19 +795,34 @@ class afcFunction:
         :param print_error: Prints error message to logger if set to True
         :return bool,str: Returns tuple of True/False, error message if error occurred
         '''
+        td1_data = self.afc.moonraker.get_td1_data()
+        return self._check_td1_error_in_data(td1_data, serial_number, print_error)
+
+    def _check_td1_error_in_data(self, td1_data: Optional[dict], serial_number: Optional[str] = None,
+                                 print_error: bool = True) -> tuple[bool, str]:
+        '''
+        Checks an already-fetched TD-1 devices dict for errors, without
+        fetching it itself.
+
+        :param td1_data: TD-1 devices dict already fetched, None if the fetch failed
+        :param serial_number: Specific serial number to check for error
+        :param print_error: Prints error message to logger if set to True
+        :return bool,str: Returns tuple of True/False, error message if error occurred
+        '''
         error_occurred = False
         error_message = ""
-        td1_data = self.afc.moonraker.get_td1_data()
-        for serial in td1_data:
-            error = td1_data[serial].get("error")
-            if error is not None:
-                if serial_number is None or serial == serial_number:
-                    error_message = f"Error with TD-1 Serial: {serial}, please fix error with TD-1 and run 'AFC_RESET_TD1 SERIAL={serial}' macro.\n"
-                    error_message += "Some errors can occur when first booting machine and filament is in TD-1 device\n"
-                    error_message += f"Reported Error: {td1_data[serial]['error']}"
-                    error_occurred = True
-                    if print_error:
-                        self.logger.error(error_message)
+        if td1_data is not None:
+            for serial in td1_data:
+                error = td1_data[serial].get("error")
+                if error is not None:
+                    if (serial_number is None
+                        or serial == serial_number):
+                        error_message = f"Error with TD-1 Serial: {serial}, please fix error with TD-1 and run 'AFC_RESET_TD1 SERIAL={serial}' macro.\n"
+                        error_message += "Some errors can occur when first booting machine and filament is in TD-1 device\n"
+                        error_message += f"Reported Error: {td1_data[serial]['error']}"
+                        error_occurred = True
+                        if print_error:
+                            self.logger.error(error_message)
         return error_occurred, error_message
 
     def check_for_td1_id(self, serial_number):
@@ -746,10 +835,23 @@ class afcFunction:
                           str: error message if device does not exist or an error with TD-1 device
         """
         td1_data = self.afc.moonraker.get_td1_data()
-        if serial_number not in td1_data:
+        return self._check_td1_id_in_data(td1_data, serial_number)
+
+    def _check_td1_id_in_data(self, td1_data: Optional[dict], serial_number: Optional[str]) -> tuple[bool, str]:
+        """
+        Validates a serial number against an already-fetched TD-1 devices dict,
+        without fetching it itself.
+
+        :param td1_data: TD-1 devices dict already fetched, None if the fetch failed
+        :param serial_number: Serial number to check for
+        :return bool,str: bool: True if device exists/False if device does not exist or error with device
+                          str: error message if device does not exist or an error with TD-1 device
+        """
+        if (td1_data is None
+            or serial_number not in td1_data):
             return False, f"TD-1 Device ID ({serial_number}) supplied but ID not found."
 
-        no_error, error_message = self.check_for_td1_error(serial_number, print_error=False)
+        no_error, error_message = self._check_td1_error_in_data(td1_data, serial_number, print_error=False)
         return not no_error, error_message
 
     def gcode_get_value( self, gcmd, get_attr, variable, variable_name, section_name, key_name=None, cast_to_bool=False ):
@@ -1113,6 +1215,11 @@ class afcFunction:
             self.logger.info('Toolhead must be unloaded to run tests.')
             return
 
+        error_str = self.afc.verify_macro_positions()
+        if error_str:
+            self.logger.error(error_str)
+            return
+
         prompt = AFCprompt(gcmd, self.logger)
         buttons = []
         title = 'AFC Test Lanes'
@@ -1178,7 +1285,9 @@ class afcFunction:
         prompt.p_end()
 
         if lane is not None:
-            self.afc.gcode.run_script_from_command('AFC_PARK')
+            if (self.afc.park
+                and self.afc.park_cmd):
+                self.afc.gcode.run_script_from_command(self.afc.park_cmd)
             self.logger.info('Starting test for lane(s): {}'.format(lane))
             lane_obj = self.afc.lanes.get(lane)
             if lane != 'all':
@@ -1197,7 +1306,8 @@ class afcFunction:
 
                     self._safe_extrude(self.afc.test_extrude_amt)
                     self.logger.info("Unloading lane {}".format(lane))
-                    self.afc.TOOL_UNLOAD(lane_obj)
+                    if not self.afc.TOOL_UNLOAD(lane_obj):
+                        self.afc.afc_stats.increase_unload_error_count(self.afc)
 
                     if not self.afc.error_state:
                         self.afc.logger.info(
@@ -1229,7 +1339,8 @@ class afcFunction:
                         self.afc.logger.info(
                             "Finished testing with {} iterations for all loaded lanes".format(iterations)
                         )
-                        self.afc.TOOL_UNLOAD(lane_obj)
+                        if not self.afc.TOOL_UNLOAD(lane_obj):
+                            self.afc.afc_stats.increase_unload_error_count(self.afc)
         prompt.p_end()
 
     cmd_AFC_CALIBRATION_help = 'Open prompt to begin calibration by selecting Unit to calibrate'

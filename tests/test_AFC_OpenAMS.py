@@ -2061,7 +2061,9 @@ def _make_lane(name, index=1, **overrides):
     lane.remember_spool = False
     lane.tool_loaded = False
     lane.load_state = False
-    lane.map = "T0"
+    lane.map = ["T0"]
+    lane.current_map = "T0"
+    lane.map_to_string = MagicMock(return_value="T0")
     lane._oams_runout_detected = False
     for k, v in overrides.items():
         setattr(lane, k, v)
@@ -2891,7 +2893,7 @@ class TestHandleSameFpsReload:
     def test_success_switches_active_lane(self):
         ams, afc, printer, reactor = _make_ams()
         ams._oams_load = MagicMock(return_value=True)
-        ams.lane_not_ready = MagicMock()
+        ams.lane_unloaded = MagicMock()
         ams.lane_tool_loaded = MagicMock()
         ams.gcode = MagicMock()
         source = _make_lane("lane1", map=None)
@@ -2901,7 +2903,7 @@ class TestHandleSameFpsReload:
 
         assert result is True
         assert source.status == AFCLaneState.NONE
-        ams.lane_not_ready.assert_called_once_with(source)
+        ams.lane_unloaded.assert_called_once_with(source)
         target.set_tool_loaded.assert_called_once()
         ams.lane_tool_loaded.assert_called_once_with(target)
         afc.save_vars.assert_called_once()
@@ -2912,10 +2914,10 @@ class TestHandleSameFpsReload:
             "info", "Same-FPS reload complete: lane2 now active"
         ) in ams.logger.messages
 
-    def test_remaps_source_map_when_present(self):
+    def test_swaps_mapping_via_afc_swap_mapping_when_source_map_present(self):
         ams, afc, printer, reactor = _make_ams()
         ams._oams_load = MagicMock(return_value=True)
-        ams.lane_not_ready = MagicMock()
+        ams.lane_unloaded = MagicMock()
         ams.lane_tool_loaded = MagicMock()
         ams.gcode = MagicMock()
         source = _make_lane("lane1", map="T0")
@@ -2924,15 +2926,14 @@ class TestHandleSameFpsReload:
         ams.handle_same_fps_reload(source, target)
 
         ams.gcode.run_script_from_command.assert_called_once_with(
-            "SET_MAP LANE=lane2 MAP=T0")
-        assert (
-            "info", "Remapped T0 from lane1 to lane2"
-        ) in ams.logger.messages
+            "AFC_SWAP_MAPPING FROM=lane1 TO=lane2")
 
-    def test_no_source_map_skips_remap(self):
+    def test_swaps_mapping_via_afc_swap_mapping_when_no_source_map(self):
+        """AFC_SWAP_MAPPING is called unconditionally, regardless of whether
+        the source lane currently has a map assigned."""
         ams, afc, printer, reactor = _make_ams()
         ams._oams_load = MagicMock(return_value=True)
-        ams.lane_not_ready = MagicMock()
+        ams.lane_unloaded = MagicMock()
         ams.lane_tool_loaded = MagicMock()
         ams.gcode = MagicMock()
         source = _make_lane("lane1", map=None)
@@ -2940,12 +2941,13 @@ class TestHandleSameFpsReload:
 
         ams.handle_same_fps_reload(source, target)
 
-        ams.gcode.run_script_from_command.assert_not_called()
+        ams.gcode.run_script_from_command.assert_called_once_with(
+            "AFC_SWAP_MAPPING FROM=lane1 TO=lane2")
 
     def test_hardware_load_failure_pauses_and_returns_false(self):
         ams, afc, printer, reactor = _make_ams()
         ams._oams_load = MagicMock(return_value=False)
-        ams.lane_not_ready = MagicMock()
+        ams.lane_unloaded = MagicMock()
         source = _make_lane("lane1")
         target = _make_lane("lane2")
 
@@ -2962,7 +2964,7 @@ class TestHandleSameFpsReload:
     def test_hardware_load_exception_pauses_and_returns_false(self):
         ams, afc, printer, reactor = _make_ams()
         ams._oams_load = MagicMock(side_effect=Exception("mcu fault"))
-        ams.lane_not_ready = MagicMock()
+        ams.lane_unloaded = MagicMock()
         source = _make_lane("lane1")
         target = _make_lane("lane2")
 
@@ -2979,27 +2981,27 @@ class TestHandleSameFpsReload:
 class TestHandleRunout:
     def test_no_runout_lane_configured_pauses(self):
         ams, afc, printer, reactor = _make_ams()
-        ams.lane_not_ready = MagicMock()
+        ams.lane_unloaded = MagicMock()
         lane = _make_lane("lane1", runout_lane=None)
 
         result = ams.handle_runout(lane)
 
         assert result is True
         assert lane.status == AFCLaneState.NONE
-        ams.lane_not_ready.assert_called_once_with(lane)
+        ams.lane_unloaded.assert_called_once_with(lane)
         afc.error.AFC_error.assert_called_once()
         assert afc.error.AFC_error.call_args[1]["pause"] is True
 
     def test_runout_lane_not_found_pauses(self):
         ams, afc, printer, reactor = _make_ams()
-        ams.lane_not_ready = MagicMock()
+        ams.lane_unloaded = MagicMock()
         ams._resolve_lane_reference = MagicMock(return_value=None)
         lane = _make_lane("lane1", runout_lane="missing_lane")
 
         result = ams.handle_runout(lane)
 
         assert result is True
-        ams.lane_not_ready.assert_called_once_with(lane)
+        ams.lane_unloaded.assert_called_once_with(lane)
         afc.error.AFC_error.assert_called_once()
 
     def test_same_extruder_triggers_seamless_reload(self):
@@ -3772,20 +3774,8 @@ class TestPollOamsSensors:
 
 def _make_gcmd(values=None):
     """Minimal gcmd stand-in matching AFC's GCodeCommand-ish interface."""
-    values = values or {}
-    gcmd = MagicMock()
-
-    def get_float(name, default=None, **kwargs):
-        return values.get(name, default)
-
-    def get_int(name, default=None, **kwargs):
-        return values.get(name, default)
-
-    gcmd.get_float = MagicMock(side_effect=get_float)
-    gcmd.get_int = MagicMock(side_effect=get_int)
-    gcmd.error = MagicMock(side_effect=lambda msg: Exception(msg))
-    gcmd.respond_info = MagicMock()
-    return gcmd
+    from tests.conftest import MockGCodeCommand
+    return MockGCodeCommand(params=values or {})
 
 
 # ── Stuck spool / clog callbacks ───────────────────────────────────────────
@@ -4050,9 +4040,7 @@ class TestStuckSpoolRecoveryClearOamsState:
 
 class TestCmdStuckSpoolRecovery:
     def _gcmd(self, lane="lane1", fps="fps1"):
-        gcmd = MagicMock()
-        gcmd.get = MagicMock(side_effect=lambda k, default=None: {"LANE": lane, "FPS": fps}.get(k, default))
-        return gcmd
+        return _make_gcmd({"LANE": lane, "FPS": fps})
 
     def test_lane_not_found_falls_back(self):
         ams, afc, printer, reactor = _make_ams()
@@ -4586,17 +4574,17 @@ class TestOnFilamentInsert:
 class TestOnFilamentRemove:
     def test_clears_loaded_to_hub_and_unloads(self):
         ams, afc, printer, reactor = _make_ams()
-        ams.lane_unloaded = MagicMock()
+        ams.lane_not_ready = MagicMock()
         ams._clear_lane_info = MagicMock()
         ams._clear_oams_state_for_bay = MagicMock()
         lane = _make_lane("lane1", loaded_to_hub=True, tool_loaded=False)
         ams.on_filament_remove(lane)
         assert lane.loaded_to_hub is False
-        ams.lane_unloaded.assert_called_once_with(lane)
+        ams.lane_not_ready.assert_called_once_with(lane)
 
     def test_cancels_pending_spool_loaded_timer(self):
         ams, afc, printer, reactor = _make_ams()
-        ams.lane_unloaded = MagicMock()
+        ams.lane_not_ready = MagicMock()
         ams._clear_lane_info = MagicMock()
         ams._clear_oams_state_for_bay = MagicMock()
         timer = MagicMock()
@@ -4609,7 +4597,7 @@ class TestOnFilamentRemove:
 
     def test_timer_unregister_failure_is_swallowed(self):
         ams, afc, printer, reactor = _make_ams()
-        ams.lane_unloaded = MagicMock()
+        ams.lane_not_ready = MagicMock()
         ams._clear_lane_info = MagicMock()
         ams._clear_oams_state_for_bay = MagicMock()
         reactor.unregister_timer = MagicMock(side_effect=Exception("boom"))
@@ -4620,7 +4608,7 @@ class TestOnFilamentRemove:
 
     def test_clears_lane_info_when_not_tool_loaded(self):
         ams, afc, printer, reactor = _make_ams()
-        ams.lane_unloaded = MagicMock()
+        ams.lane_not_ready = MagicMock()
         ams._clear_lane_info = MagicMock()
         ams._clear_oams_state_for_bay = MagicMock()
         lane = _make_lane("lane1", tool_loaded=False)
@@ -4630,7 +4618,7 @@ class TestOnFilamentRemove:
 
     def test_skips_clear_lane_info_when_tool_loaded_runout(self):
         ams, afc, printer, reactor = _make_ams()
-        ams.lane_unloaded = MagicMock()
+        ams.lane_not_ready = MagicMock()
         ams._clear_lane_info = MagicMock()
         ams._clear_oams_state_for_bay = MagicMock()
         lane = _make_lane("lane1", tool_loaded=True)
@@ -4640,7 +4628,7 @@ class TestOnFilamentRemove:
 
     def test_updates_hardware_snapshot_when_mapped(self):
         ams, afc, printer, reactor = _make_ams()
-        ams.lane_unloaded = MagicMock()
+        ams.lane_not_ready = MagicMock()
         ams._clear_lane_info = MagicMock()
         ams._clear_oams_state_for_bay = MagicMock()
         ams._spool_map["lane1"] = 0
@@ -6670,7 +6658,7 @@ class TestSystemTest:
         assert result is True
         afc.spool.clear_values.assert_called_once_with(lane)
         ams.lane_loaded.assert_not_called()
-        afc.function.afc_led.assert_called_once_with(lane.led_not_ready, lane.led_index)
+        lane.unit_obj.lane_not_ready.assert_called_once_with(lane)
         assert any(
             lvl == "info" and m.startswith("lane1 tool cmd: T0 ")
             for lvl, m in ams.logger.messages)

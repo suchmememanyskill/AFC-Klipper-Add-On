@@ -40,7 +40,9 @@ if [[ -n "${_requested_branch}" && -d "${SCRIPT_DIR}/.git" ]]; then
   fi
 fi
 
+source include/units/registry.sh
 source include/constants.sh
+source include/menus/unit_art.sh
 
 # Menu functions
 source include/menus/main_menu.sh
@@ -87,8 +89,8 @@ main() {
   moonraker="${moonraker_address}:${moonraker_port}"
   afc_config_dir="${printer_config_dir}/AFC"
   afc_file="${afc_config_dir}/AFC.cfg"
-  moonraker_config_file="${printer_config_dir}/moonraker.conf"
-  afc_path="$HOME/AFC-Klipper-Add-On"
+  moonraker_config_file="${moonraker_config_file:-${printer_config_dir}/moonraker.conf}"
+  afc_path="${SCRIPT_DIR}"
 
   # Make sure necessary directories exist
   echo "Ensuring we are not running as root (except on K1 OS)..."

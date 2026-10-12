@@ -10,7 +10,9 @@ export LC_ALL=C
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+source "${SCRIPT_DIR}/include/units/registry.sh"
 source "${SCRIPT_DIR}/include/constants.sh"
+source "${SCRIPT_DIR}/include/menus/unit_art.sh"
 
 # Menu functions
 source "${SCRIPT_DIR}/include/menus/main_menu.sh"
@@ -59,7 +61,8 @@ main() {
   afc_config_dir="${printer_config_dir}/AFC"
   afc_file="${afc_config_dir}/AFC.cfg"
   moonraker_config_file="${moonraker_config_file:-${printer_config_dir}/moonraker.conf}"
-  afc_path="$HOME/AFC-Klipper-Add-On"
+  afc_path="${SCRIPT_DIR}"
+  [[ -d "${afc_path}/.git" ]] || git_install="False"
 
 
   # Perform prerequisite and safety checks, then start the update process

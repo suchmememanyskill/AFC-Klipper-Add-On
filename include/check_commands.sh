@@ -138,9 +138,11 @@ query_printer_status() {
   
   # Needed for Snapmaker U1 since jq is not installed on this machine
   if ! command -v jq &> /dev/null; then
-    tmp="${response#*\"idle_timeout\":}"
-    tmp="${tmp#*\"state\": \"}"
-    state="${tmp%%\"*}"
+    if [[ "$response" =~ \"idle_timeout\"[[:space:]]*:[[:space:]]*\{[^}]*\"state\"[[:space:]]*:[[:space:]]*\"([^\"]*)\" ]]; then
+      state="${BASH_REMATCH[1]}"
+    else
+      state=""
+    fi
   else
     state=$(echo "$response" | jq -r '.result.status.idle_timeout.state' 2>/dev/null)
   fi
@@ -167,6 +169,8 @@ check_for_prereqs() {
   if [ ${#missing_dependencies[@]} -ne 0 ]; then
     echo "Missing software prerequisites. Please run the below command and re-run this install script."
     echo "sudo apt-get install -y ${missing_dependencies[*]}"
+    echo "If apt is not available on your machine, please use the applicable package manager or a tool"
+    echo "such as pip. Note, pip cannot be used for jq."
     exit 1
   fi
 }

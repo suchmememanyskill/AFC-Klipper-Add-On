@@ -1,7 +1,7 @@
 """
 Shared test fixtures and Klipper mock infrastructure for AFC unit tests.
 
-All Klipper-specific modules (configfile, queuelogger, webhooks) are mocked
+All Klipper-specific modules (configfile, queuelogger, webhooks, gcode) are mocked
 here at the module level so that all test files can import AFC extras modules
 without a running Klipper instance.
 """
@@ -14,7 +14,7 @@ import pathlib
 import queue
 import sys
 import types
-from typing import Any, Dict
+from typing import Any, Callable, Dict
 from unittest.mock import MagicMock, patch  # noqa: F401
 
 import pytest
@@ -32,8 +32,13 @@ def _make_configfile_mock():
     """Mock for Klipper's configfile module (not the PyPI configfile package)."""
     mod = types.ModuleType("configfile")
 
-    class KlipperError(Exception):
-        """Klipper-style configuration error."""
+    # Real Klipper's ConfigWrapper.error IS configparser.Error (klippy/
+    # configfile.py: "class ConfigWrapper: error = configparser.Error") --
+    # reuse the same class here rather than a separate fake Exception type,
+    # so code that raises configparser.Error directly (as extras modules
+    # commonly do) and code that raises via configfile.error/config.error(...)
+    # are the same, catchable exception type in tests either way.
+    KlipperError = configparser.Error
 
     class ConfigWrapper:
         def __init__(self, printer=None, fileconfig=None, access_tracking=None, section=""):
@@ -111,6 +116,18 @@ def _make_webhooks_mock():
         pass
 
     mod.GCodeHelper = GCodeHelper
+    return mod
+
+
+class CommandError(Exception):
+    """Mirrors Klipper's gcode.CommandError -- raised by GCodeCommand.get()
+    (real and mocked) and by run_script_from_command failures."""
+
+
+def _make_gcode_mock():
+    """Mock for Klipper's gcode module."""
+    mod = types.ModuleType("gcode")
+    mod.CommandError = CommandError
     return mod
 
 
@@ -223,6 +240,7 @@ def _make_print_task_config():
 sys.modules.setdefault("configfile", _make_configfile_mock())
 sys.modules.setdefault("queuelogger", _make_queuelogger_mock())
 sys.modules.setdefault("webhooks", _make_webhooks_mock())
+sys.modules.setdefault("gcode", _make_gcode_mock())
 
 # C-extension / Klipper internals mocks
 sys.modules.setdefault("chelper", _make_chelper_mock())
@@ -281,6 +299,9 @@ class MockReactor:
     def register_callback(self, callback, waketime=None):
         pass
 
+    def register_async_callback(self, callback, waketime=None):
+        pass
+
     def unregister_timer(self, timer):
         pass
 
@@ -324,6 +345,111 @@ class MockGcode:
         return MagicMock()
 
 
+class MockGCodeCommand:
+    """Mock for Klipper's GCodeCommand, mirroring gcode.py's real .get()/
+    .get_int()/.get_float() sentinel-default semantics: a parameter with no
+    default supplied and no value in params raises .error(...), exactly like
+    real Klipper -- so code under test that assumes a parameter is present
+    can't silently receive None back in a test the way a bare
+    MagicMock()/lambda mock would let it.
+
+    Values are stored as given (not coerced to strings the way a real parsed
+    command line would be) so tests can pass native ints/floats/strings for
+    convenience; get_int()/get_float() still route through the same parser/
+    minval/maxval/above/below validation as real Klipper.
+    """
+
+    class sentinel:
+        pass
+
+    def __init__(self, params=None, commandline="", command=""):
+        self._params: dict = dict(params or {})
+        self._commandline = commandline
+        self._command = command
+        # A trackable Mock (not a bare class attribute like real Klipper's
+        # `error = CommandError`) so tests can assert on the exact call
+        # (gcmd.error.assert_called_once_with(...)). side_effect is a lambda,
+        # not the CommandError class directly -- Mock's side_effect treats an
+        # exception class specially and raises it immediately with no args,
+        # which would silently drop the message. The lambda instead just
+        # returns a real CommandError(msg) for the caller to `raise`, exactly
+        # like production's `raise gcmd.error(msg)`.
+        self.error = MagicMock(side_effect=lambda *a, **kw: CommandError(*a, **kw))
+        self.respond_info = MagicMock()
+        self.respond_raw = MagicMock()
+        # get()/get_int()/get_float() are trackable Mocks wrapping the real
+        # (renamed _get*) implementations below via side_effect, so tests can
+        # both assert on the exact call (gcmd.get_int.assert_called_once_with(...))
+        # and get real sentinel/parsing/minval/maxval behavior back -- side_effect's
+        # return value becomes the mock's return value, and a raised exception
+        # propagates the same as calling the real method directly.
+        self.get = MagicMock(side_effect=self._get)
+        self.get_int = MagicMock(side_effect=self._get_int)
+        self.get_float = MagicMock(side_effect=self._get_float)
+
+    def get_command(self):
+        return self._command
+
+    def get_commandline(self):
+        return self._commandline
+
+    def get_raw_command_parameters(self):
+        """Mirrors real Klipper's slicing logic exactly, so the defaults
+        (command="", commandline="") naturally return "" without any extra
+        setup -- override get_raw_command_parameters on the instance for a
+        test that needs a specific raw string."""
+        command = self._command
+        origline = self._commandline
+        param_start = len(command)
+        param_end = len(origline)
+        if origline[:param_start].upper() != command:
+            param_start += origline.upper().find(command)
+            end = origline.rfind('*')
+            if end >= 0 and origline[end + 1:].isdigit():
+                param_end = end
+        if origline[param_start:param_start + 1].isspace():
+            param_start += 1
+        return origline[param_start:param_end]
+
+    def get_command_parameters(self):
+        return self._params
+
+    def _get(self, name, default=sentinel, parser: Callable = str, minval=None, maxval=None,
+             above=None, below=None):
+        value = self._params.get(name)
+        if value is None:
+            if default is self.sentinel:
+                error_str = f"Error on '{self._commandline}': missing {name}"
+                raise self.error(error_str)
+            return default
+        try:
+            value = parser(value)
+        except Exception:
+            error_str = f"Error on '{self._commandline}': unable to parse {value}"
+            raise self.error(error_str)
+        if minval is not None and value < minval:
+            error_str = f"Error on '{self._commandline}': {name} must have minimum of {minval}"
+            raise self.error(error_str)
+        if maxval is not None and value > maxval:
+            error_str = f"Error on '{self._commandline}': {name} must have maximum of {maxval}"
+            raise self.error(error_str)
+        if above is not None and value <= above:
+            error_str = f"Error on '{self._commandline}': {name} must be above {above}"
+            raise self.error(error_str)
+        if below is not None and value >= below:
+            error_str = f"Error on '{self._commandline}': {name} must be below {below}"
+            raise self.error(error_str)
+        return value
+
+    def _get_int(self, name, default=sentinel, minval=None, maxval=None):
+        return self._get(name, default, parser=int, minval=minval, maxval=maxval)
+
+    def _get_float(self, name, default=sentinel, minval=None, maxval=None,
+                   above=None, below=None):
+        return self._get(name, default, parser=float, minval=minval,
+                         maxval=maxval, above=above, below=below)
+
+
 class MockLogger:
     """Lightweight stand-in for AFC_logger.AFC_logger."""
 
@@ -339,8 +465,10 @@ class MockLogger:
     def debug(self, msg, **kwargs):
         self.messages.append(("debug", msg))
 
-    def error(self, msg=None, **kwargs):
-        # AFC_logger.error() can be called as error(msg) or error(message=msg, ...)
+    def error(self, msg=None, traceback=None, stack_name="", **kwargs):
+        # Real AFC_logger.error() signature is (message, traceback=None, stack_name=""),
+        # accepting traceback/stack_name positionally or by keyword -- match that here
+        # so tests hitting either calling convention don't get a spurious TypeError.
         message = msg if msg is not None else kwargs.get("message", "")
         self.messages.append(("error", message))
 
@@ -392,18 +520,22 @@ class MockAFC:
         self.enable_sensors_in_gui = False
         self.debounce_delay = 0.1
         self.enable_hub_runout = False
+        self.load_to_hub = True
         self.enable_tool_runout = True
         self.enable_runout_in_bypass = False
         self.show_macros = True
         self.message_queue: list = []
+        self.active_led_effects: list[str] = []
         self.log_frame_data = True
         self.position_saved = False
         self.in_toolchange = False
         self.error_timeout = 600
         self.td1_defined = False
         self.td1_present = False
+        self.testing = False
         self.moonraker = MockMoonraker()
         self.function = MagicMock()
+        self.afc_stats = MagicMock()
         self.error = MagicMock()
         self.spool = MagicMock()
         self.short_moves_speed = 50.0
@@ -463,6 +595,7 @@ class MockAFC:
         self.restore_pos = MagicMock()
 
         self.snapmaker_printer = False
+        self.enable_multiple_mapping = False
 
 
 class MockPrinter:
@@ -476,7 +609,11 @@ class MockPrinter:
         self._objects: dict = {}
         self.state_message = "Printer is ready"
         self.start_args: dict = {}
-        self.objects: dict = {}
+        # Real Klipper keeps a single objects dict backing both attribute
+        # names; alias them so writes through either name (lookup_object's
+        # cache vs. code that reaches into printer.objects directly, like
+        # AFC_utils.add_filament_switch) are visible from the other.
+        self.objects: dict = self._objects
         self._event_handlers: dict = {}
     
     def lookup_object(self, name, default=None):
@@ -506,9 +643,13 @@ class MockPrinter:
             self._objects[name] = val
         return val
 
-    def load_object(self, config, name):
+    _NO_DEFAULT = object()
+
+    def load_object(self, config, name, default=_NO_DEFAULT):
         result = self.lookup_object(name)
         if result is None:
+            if default is not self._NO_DEFAULT:
+                return default
             result = self._objects[name] = MagicMock()
 
         return result
@@ -525,6 +666,18 @@ class MockPrinter:
 
     def get_start_args(self):
         return self.start_args
+
+
+class _MockConfigSentinel:
+    """Distinguishes "caller passed no default" from "caller explicitly
+    passed default=None" -- mirrors configfile.sentinel in real Klipper.
+    Needed because get(option, None) is a legitimate, common call (an
+    explicit optional value) that must NOT raise, while get(option) with no
+    default at all means the option is required and missing config must
+    raise, exactly like real Klipper does."""
+
+
+_MOCK_CONFIG_SENTINEL = _MockConfigSentinel()
 
 
 class MockConfig:
@@ -544,21 +697,33 @@ class MockConfig:
     def get_name(self):
         return self._name
 
-    def get(self, option, default=None):
-        try:
-            val = self.fileconfig.get(self.section, option)
-        except:
-            val = self._values.get(option, default)
-        return val
+    def _require(self, option, default):
+        """Raises like real Klipper's ConfigWrapper when `option` isn't set
+        anywhere and the caller didn't pass a default; otherwise returns the
+        resolved value (config value if present, else the given default)."""
+        if option in self._values:
+            return self._values[option]
+        if default is _MOCK_CONFIG_SENTINEL:
+            from configfile import error as KlipperError
+            error_str = f"Option '{option}' in section '{self.section}' must be specified"
+            raise KlipperError(error_str)
+        return default
 
-    def getfloat(self, option, default=0.0, **kwargs):
-        val = self._values.get(option, default)
+    def get(self, option, default=_MOCK_CONFIG_SENTINEL):
+        try:
+            return self.fileconfig.get(self.section, option)
+        except Exception:
+            pass
+        return self._require(option, default)
+
+    def getfloat(self, option, default=_MOCK_CONFIG_SENTINEL, **kwargs):
+        val = self._require(option, default)
         if val is None:
             return None
         return float(val)
 
-    def getboolean(self, option, default=False, **kwargs):
-        val = self._values.get(option, default)
+    def getboolean(self, option, default=_MOCK_CONFIG_SENTINEL, **kwargs):
+        val = self._require(option, default)
         if val is None:
             return None
         if isinstance(val, bool):
@@ -567,19 +732,18 @@ class MockConfig:
             return val.lower() in ("true", "1", "yes")
         return bool(val)
 
-    def getint(self, option, default=0, **kwargs):
-        val = self._values.get(option, default)
-        if val is not None:
-            return int(val)
-        else:
-            return val
+    def getint(self, option, default=_MOCK_CONFIG_SENTINEL, **kwargs):
+        val = self._require(option, default)
+        if val is None:
+            return None
+        return int(val)
 
-    def getlist(self, option, default=None, **kwargs):
-        val = self._values.get(option, default)
+    def getlist(self, option, default=_MOCK_CONFIG_SENTINEL, **kwargs):
+        val = self._require(option, default)
         return val if val is not None else []
 
-    def getlists(self, option, default=None, **kwargs):
-        val = self._values.get(option, default)
+    def getlists(self, option, default=_MOCK_CONFIG_SENTINEL, **kwargs):
+        val = self._require(option, default)
         return val if val is not None else ()
 
     def getchoice(
