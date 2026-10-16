@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
 
 import pytest
 
@@ -8,7 +8,10 @@ from extras.AFC_canvas import afcCanvas
 from extras.AFC_canvas_lane import AFCCanvasLane
 from extras.AFC_functions import afcFunction
 from extras.AFC_lane import AFCMoveWarning, MoveDirection, SpeedMode, AFCHomingPoints
-from tests.conftest import MockAFC, MockConfig, MockLogger, MockPrinter, MockReactor
+from extras.AFC_spool import AFCSpool
+from tests.conftest import (
+    MockAFC, MockConfig, MockGCodeCommand, MockLogger, MockPrinter, MockReactor,
+)
 
 
 def _make_canvas_unit(name="CANVAS_1"):
@@ -238,6 +241,60 @@ def canvas_system_objects(canvas_unit: afcCanvas) -> tuple[afcCanvas, AFCCanvasL
     canvas_unit.lanes[lane.name] = lane
     assert canvas_unit.logger.messages == []
     return canvas_unit, lane
+
+
+class TestAFCCanvasLaneLoaded:
+    @pytest.mark.parametrize("kwargs", [{}, {"force": False}, {"force": True}])
+    def test_always_reapplies_canvas_ready_led(self, canvas_system_objects, kwargs):
+        unit, lane = canvas_system_objects
+        unit.afc.led_ready = "0.25,0,0,0.75"
+        lane.led_ready = "1,0,0,0"
+        lane.current_led_state = "loaded"
+        lane.apply_canvas_led = MagicMock()
+
+        unit.lane_loaded(lane, **kwargs)
+        unit.lane_loaded(lane, **kwargs)
+
+        assert lane.apply_canvas_led.call_args_list == [
+            call("0.25,0,0,0.75"),
+            call("0.25,0,0,0.75"),
+        ]
+        unit.afc.function.afc_led.assert_not_called()
+        assert unit.logger.messages == [
+            ("debug", "lane_loaded: lane1"),
+            ("debug", "lane_loaded: lane1"),
+        ]
+
+
+class TestAFCCanvasCmdSetColor:
+    @pytest.mark.parametrize("color,expected", [
+        ("FF0000", "#FF0000"),
+        ("#12AB34", "#12AB34"),
+    ])
+    def test_loaded_canvas_lane_refreshes_led_and_saves(
+        self, canvas_system_objects, color, expected,
+    ):
+        unit, lane = canvas_system_objects
+        unit.afc.units[unit.name] = unit
+        lane._load_state = True
+        lane.hub_obj = None
+        lane.multi_color = ["FFFFFF", "000000"]
+        lane.apply_canvas_led = MagicMock()
+        spool = AFCSpool(MockConfig(name="AFC_Spool", printer=unit.printer))
+        spool.afc = unit.afc
+        spool.handle_connect()
+        gcmd = MockGCodeCommand(params={"LANE": lane.name, "COLOR": color})
+        assert lane.load_state is True
+        assert lane.unit_obj is unit
+
+        spool.cmd_SET_COLOR(gcmd)
+
+        assert lane.color == expected
+        assert lane.multi_color == []
+        lane.send_lane_data.assert_called_once_with()
+        lane.apply_canvas_led.assert_called_once_with(unit.afc.led_ready)
+        unit.afc.save_vars.assert_called_once_with()
+        assert unit.logger.messages == [("debug", "lane_loaded: lane1")]
 
 
 class TestAFCCanvasSystemTest:

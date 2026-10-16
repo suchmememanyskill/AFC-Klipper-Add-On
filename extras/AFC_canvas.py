@@ -183,7 +183,7 @@ class afcCanvas(afcUnit):
         self.logger.debug(f"lane_not_ready: {lane.name}")
         getattr(lane, "apply_canvas_led")(self.afc.led_not_ready)
 
-    def lane_loaded(self, lane):
+    def lane_loaded(self, lane: AFCLane, force: bool = False) -> None:
         self.logger.debug(f"lane_loaded: {lane.name}")
         getattr(lane, "apply_canvas_led")(self.afc.led_ready)
 
