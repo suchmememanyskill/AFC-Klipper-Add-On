@@ -179,9 +179,15 @@ class afcCanvas(afcUnit):
         speed = speed_data[0] if isinstance(speed_data, tuple) else speed_data
         return getattr(lane, "_canvas_move_until")(endstop, distance, speed)
 
-    def lane_not_ready(self, lane):
+    def lane_not_ready(self, lane: AFCLane) -> None:
+        """
+        Clear the CANVAS load state and turn off the empty lane's LEDs.
+
+        :param lane: Lane to mark as empty
+        """
         self.logger.debug(f"lane_not_ready: {lane.name}")
-        getattr(lane, "apply_canvas_led")(self.afc.led_not_ready)
+        getattr(lane, "apply_canvas_led")(self.afc.led_off)
+        lane._load_state = False
 
     def lane_loaded(self, lane: AFCLane, force: bool = False) -> None:
         self.logger.debug(f"lane_loaded: {lane.name}")

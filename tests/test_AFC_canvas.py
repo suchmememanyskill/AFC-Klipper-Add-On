@@ -1,13 +1,15 @@
 from __future__ import annotations
 
-from unittest.mock import MagicMock, call
+from unittest.mock import ANY, MagicMock, call
 
 import pytest
 
 from extras.AFC_canvas import afcCanvas
 from extras.AFC_canvas_lane import AFCCanvasLane
 from extras.AFC_functions import afcFunction
-from extras.AFC_lane import AFCMoveWarning, MoveDirection, SpeedMode, AFCHomingPoints
+from extras.AFC_lane import (
+    AFCMoveWarning, MoveDirection, SpeedMode, AFCHomingPoints, AFCLaneState,
+)
 from extras.AFC_spool import AFCSpool
 from tests.conftest import (
     MockAFC, MockConfig, MockGCodeCommand, MockLogger, MockPrinter, MockReactor,
@@ -241,6 +243,93 @@ def canvas_system_objects(canvas_unit: afcCanvas) -> tuple[afcCanvas, AFCCanvasL
     canvas_unit.lanes[lane.name] = lane
     assert canvas_unit.logger.messages == []
     return canvas_unit, lane
+
+
+class TestAFCCanvasLaneNotReady:
+    @pytest.mark.parametrize("load_state", [True, False])
+    def test_clears_load_state_and_turns_led_off(self, canvas_system_objects, load_state):
+        unit, lane = canvas_system_objects
+        lane._load_state = load_state
+        lane.apply_canvas_led = MagicMock()
+
+        unit.lane_not_ready(lane)
+
+        assert lane.raw_load_state is False
+        lane.apply_canvas_led.assert_called_once_with(unit.afc.led_off)
+        assert unit.logger.messages == [("debug", "lane_not_ready: lane1")]
+
+
+class TestAFCCanvasPrepCallback:
+    @pytest.mark.parametrize("defer_removal", [False, True])
+    def test_removed_spool_can_be_reinserted(self, canvas_system_objects, defer_removal):
+        unit, lane = canvas_system_objects
+        lane.set_afc_prep_done()
+        lane.prep_state = True
+        lane._load_state = True
+        lane.status = AFCLaneState.LOADED
+        lane.loaded_to_hub = True
+        lane.apply_canvas_led = MagicMock()
+        lane.move_with_odometer = MagicMock()
+        lane.disengage_motors = MagicMock()
+        unit.afc.function.is_printing.return_value = False
+        unit.afc.function.check_macro_present.return_value = False
+        unit.afc.last_prep_activity_time = 0.0
+        if defer_removal:
+            unit.afc.last_prep_activity_time = 99.0
+        lane.reactor.register_callback = MagicMock()
+
+        lane.prep_callback(100.0, False)
+        lane.handle_prep_runout(100.0, False)
+
+        assert lane.prep_state is False
+        if defer_removal:
+            assert lane.prep_recheck_pending is True
+            assert lane.raw_load_state is True
+            lane.reactor.register_callback.assert_called_once_with(
+                lane._recheck_prep_runout, 102.0,
+            )
+            lane._recheck_prep_runout(103.0)
+        else:
+            lane.reactor.register_callback.assert_not_called()
+        assert lane.prep_recheck_pending is False
+        assert lane.raw_load_state is False
+        assert lane.tool_loaded is False
+        assert lane.loaded_to_hub is False
+        assert lane.status == AFCLaneState.NONE
+        assert lane.td1_data == {}
+        lane.apply_canvas_led.assert_called_once_with(unit.afc.led_off)
+        assert unit.logger.messages == [("debug", "lane_not_ready: lane1")]
+
+        lane.prep_callback(137.0, True)
+
+        assert lane.prep_state is True
+        assert lane.raw_load_state is True
+        assert lane.status == AFCLaneState.LOADED
+        assert lane.prep_active is False
+        assert lane.last_prep_time == 137.0
+        assert unit.afc.last_prep_activity_time == 137.0
+        lane.move_with_odometer.assert_called_once_with(
+            unit.prep_distance, unit.prep_speed, stop_condition=ANY,
+        )
+        lane.disengage_motors.assert_called_once_with(1.0)
+        assert lane.apply_canvas_led.call_args_list == [
+            call(unit.afc.led_off),
+            call(unit.afc.led_loading),
+            call(unit.afc.led_loading),
+            call(unit.afc.led_ready),
+            call(unit.afc.led_ready),
+        ]
+        unit.afc.error.AFC_error.assert_not_called()
+        unit.afc.spool._set_values.assert_called_once_with(lane)
+        assert unit.logger.messages == [
+            ("debug", "lane_not_ready: lane1"),
+            ("debug", "Prep: callback triggered lane1"),
+            ("debug", "lane_loading: lane1"),
+            ("debug", "prep_load: lane1"),
+            ("debug", "Prep: Load Done-lane1"),
+            ("debug", "prep_post_load: lane1"),
+            ("debug", "lane_loaded: lane1"),
+        ]
 
 
 class TestAFCCanvasLaneLoaded:
