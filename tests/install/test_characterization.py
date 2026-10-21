@@ -23,12 +23,12 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 RUN_CASE = Path(__file__).resolve().parent / "run_case.sh"
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 
-BUFFER_TYPES = ["TurtleNeck", "TurtleNeckV2", "FPS_PSF", "None"]
+BUFFER_TYPES = ["TurtleNeck", "TurtleNeckV2", "TurtleNeck2Remastered", "FPS_PSF", "None"]
 
 UNIT_VARIANTS: dict[str, list[dict[str, str]]] = {
     "BoxTurtle (4-Lane)": [{}],
     "BoxTurtle (8-Lane)": [{}],
-    "NightOwl": [{}],
+    "NightOwl": [{"nightowl_board_type": b} for b in ["ERB_2.0", "OWLFC_Mini"]],
     "ViViD": [{}],
     "OpenAMS": [{}],
     "HTLF": [{"htlf_board_type": b} for b in ["ERB", "MMB_1.1", "MMB_1.0"]],
@@ -295,7 +295,7 @@ try:
         assert actual == (
             "=== VARS ===\n"
             "supported=True\n"
-            "options=None TurtleNeck TurtleNeckV2 FPS_PSF\n"
+            "options=None TurtleNeck TurtleNeckV2 TurtleNeck2Remastered FPS_PSF\n"
             "default=TurtleNeck\n"
         )
 

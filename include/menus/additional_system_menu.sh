@@ -29,7 +29,7 @@ cycle_in_list() {
 additional_system_menu() {
   local message
   local choice
-  local counter board_counter qb_board_counter qb_motor_counter
+  local counter board_counter nightowl_board_counter qb_board_counter qb_motor_counter
   local previous_installation_type
   if ! check_existing_unit_installed; then
     echo ""
@@ -56,6 +56,7 @@ additional_system_menu() {
   fi
   counter=0
   board_counter=0
+  nightowl_board_counter=$(index_of nightowl_board_types "$nightowl_board_type")
   emu_board_counter=0
   qb_board_counter=0
   qb_motor_counter=0
@@ -159,6 +160,8 @@ additional_system_menu() {
           message="Claymore Board Type: $htlf2_board_type"
           export message
         fi ;;
+      J)
+        cycle_array nightowl_board_types nightowl_board_counter nightowl_board_type "NightOwl Board Type" ;;
       1)
         name_additional_unit
         export message ;;
@@ -189,6 +192,9 @@ additional_system_menu() {
           fi
           if [ "$additional_buffer_type" == "TurtleNeckV2" ]; then
             message+="\n\nEnsure you add the correct serial information to the ${afc_config_dir}/mcu/TurtleNeckv2.cfg file"
+          fi
+          if [ "$additional_buffer_type" == "TurtleNeck2Remastered" ]; then
+            message+="\n\nEnsure you add the correct serial information to the ${afc_config_dir}/mcu/TN2.cfg file"
           fi
           if [ "$additional_buffer_type" == "FPS_PSF" ]; then
             message+="\n\nEnsure the PSF ADC pin in your buffer configuration matches where your wiring is connected to your MCU."
