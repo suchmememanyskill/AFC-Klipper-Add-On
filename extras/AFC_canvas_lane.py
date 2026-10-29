@@ -537,7 +537,7 @@ class AFCCanvasLane(AFCLane):
         Run the CANVAS lane motor backwards for 800 ms at short speed.
         """
         try:
-            self.canvas_motor.drv8833_set_speed(-self.short_moves_speed)
+            self.canvas_motor.drv8833_set_speed(-30.0)
             self.reactor.pause(self.reactor.monotonic() + 0.8)
         finally:
             self.canvas_motor.drv8833_set_speed(0.0)
