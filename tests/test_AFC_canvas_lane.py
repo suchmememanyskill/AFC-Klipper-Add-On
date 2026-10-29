@@ -157,6 +157,7 @@ def _make_initialized_canvas_lane(
     lane.extruder_obj.tool_unload_speed = 20.0
     lane.hub_obj = None
     lane.loaded_to_hub = True
+    lane.short_moves_speed = 20.0
     lane.select_lane = MagicMock()
     lane.disable_buffer = MagicMock()
     lane.disengage_motors = MagicMock()
@@ -667,6 +668,10 @@ class TestAFCCanvasLaneCmdAfcCanvasToolUnload:
     def test_stops_when_cutter_sensor_is_engaged(self, monkeypatch):
         lane = _make_initialized_canvas_lane(monkeypatch)
         lane.unit_obj.cutter_sensor_state = True
+        events = MagicMock()
+        lane._pulse_before_unload = events.pulse
+        lane._cutter_sensor_engaged = events.cutter
+        events.cutter.return_value = True
         lane.run_cutter_sequence = MagicMock()
         lane._run_post_cut_macros = MagicMock()
 
@@ -683,6 +688,7 @@ class TestAFCCanvasLaneCmdAfcCanvasToolUnload:
             lane,
             "CANVAS tool unload failed: cutter sensor is engaged before cutting.",
         )
+        assert events.mock_calls == [call.pulse(), call.cutter()]
         assert lane.loaded_to_hub is True
         assert lane.logger.messages == []
 
@@ -705,4 +711,38 @@ class TestAFCCanvasLaneCmdAfcCanvasToolUnload:
             "CANVAS tool unload failed: cutter sensor did not disengage after cutting.",
         )
         assert lane.loaded_to_hub is True
+        assert lane.logger.messages == []
+
+
+class TestAFCCanvasLanePulseBeforeUnload:
+    @pytest.mark.parametrize("speed", [20.0, 35.0])
+    def test_runs_backwards_for_800ms_then_stops(self, monkeypatch, speed):
+        lane = _make_initialized_canvas_lane(monkeypatch)
+        lane.short_moves_speed = speed
+        events = MagicMock()
+        lane.canvas_motor = events.motor
+        lane.reactor = events.reactor
+        events.reactor.monotonic.return_value = 10.0
+
+        lane._pulse_before_unload()
+
+        assert events.mock_calls == [
+            call.motor.drv8833_set_speed(-speed),
+            call.reactor.monotonic(),
+            call.reactor.pause(10.8),
+            call.motor.drv8833_set_speed(0.0),
+        ]
+        assert lane.logger.messages == []
+
+    def test_stops_motor_when_pause_fails(self, monkeypatch):
+        lane = _make_initialized_canvas_lane(monkeypatch)
+        lane.reactor = MagicMock()
+        lane.reactor.pause.side_effect = RuntimeError("pause failed")
+
+        with pytest.raises(RuntimeError, match="pause failed"):
+            lane._pulse_before_unload()
+
+        assert lane.canvas_motor.drv8833_set_speed.call_args_list == [
+            call(-20.0), call(0.0),
+        ]
         assert lane.logger.messages == []

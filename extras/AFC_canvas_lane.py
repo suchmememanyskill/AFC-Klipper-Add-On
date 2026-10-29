@@ -532,6 +532,16 @@ class AFCCanvasLane(AFCLane):
 
         return False
 
+    def _pulse_before_unload(self) -> None:
+        """
+        Run the CANVAS lane motor backwards for 800 ms at short speed.
+        """
+        try:
+            self.canvas_motor.drv8833_set_speed(-self.short_moves_speed)
+            self.reactor.pause(self.reactor.monotonic() + 0.8)
+        finally:
+            self.canvas_motor.drv8833_set_speed(0.0)
+
     def cmd_AFC_CANVAS_TOOL_UNLOAD(self, gcmd: Any) -> None:
         """
         Unload filament from a CANVAS lane.
@@ -550,6 +560,8 @@ class AFCCanvasLane(AFCLane):
         self.afc._check_extruder_temp(self)
         self.disable_buffer()
         self.unit_obj.lane_unloading(self)
+
+        self._pulse_before_unload()
 
         if self._cutter_sensor_engaged():
             error_message = (
