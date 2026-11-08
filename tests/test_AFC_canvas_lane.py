@@ -37,6 +37,7 @@ def _make_canvas_lane(name="lane1"):
     lane.unit_obj.cutter_sensor_state = False
     lane.hub_obj = None
     lane.canvas_motor = MagicMock()
+    lane.canvas_motor.active = False
     lane.red_led_pin = MagicMock()
     lane.white_led_pin = MagicMock()
     lane.short_move_dis = 5.0
@@ -395,6 +396,101 @@ class TestAFCCanvasLaneSetGpioPin:
         assert pin.last_set_time == 6.2
 
 
+class TestAFCCanvasLaneDisengageMotors:
+    @pytest.mark.parametrize("distance", [0.0, -1.0])
+    def test_disabled_release_stops_without_moving(self, monkeypatch, distance):
+        lane = _make_configured_canvas_lane(monkeypatch, disengage_distance=distance)
+        lane.reactor.pause = MagicMock()
+
+        lane.disengage_motors(1.0)
+
+        lane.canvas_motor.drv8833_move.assert_not_called()
+        lane.canvas_motor.drv8833_set_speed.assert_called_once_with(0.0)
+        lane.reactor.pause.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "direction, expected_distance", [(1.0, -2.0), (0.0, -2.0), (-1.0, 2.0)]
+    )
+    def test_completed_release_stops_in_both_directions(
+        self, monkeypatch, direction, expected_distance
+    ):
+        lane = _make_configured_canvas_lane(monkeypatch, disengage_distance=2.0)
+        lane.unit_obj = MagicMock()
+        lane.short_moves_accel = 400.0
+        lane.canvas_motor.active = True
+        lane.reactor.monotonic = MagicMock(side_effect=[10.0, 10.5, 10.5])
+
+        def complete_release(until):
+            if until != 10.5:
+                lane.canvas_motor.active = False
+
+        lane.reactor.pause = MagicMock(side_effect=complete_release)
+
+        lane.disengage_motors(direction)
+
+        lane.unit_obj.select_lane.assert_called_once_with(lane)
+        lane.canvas_motor.drv8833_move.assert_called_once_with(
+            30.0, expected_distance, wait_for_completion=False
+        )
+        assert lane.reactor.pause.call_args_list == [call(10.5), call(10.51)]
+        assert lane.canvas_motor.active is False
+        lane.canvas_motor.drv8833_set_speed.assert_called_once_with(0.0)
+
+    def test_already_completed_release_does_not_poll(self, monkeypatch):
+        lane = _make_configured_canvas_lane(monkeypatch)
+        lane.short_moves_accel = 400.0
+        lane.move = MagicMock()
+        lane.canvas_motor.active = False
+        lane.reactor.pause = MagicMock()
+
+        lane.disengage_motors(1.0)
+
+        lane.move.assert_called_once_with(
+            -1.0, 30.0, 400.0, False, wait_for_completion=False
+        )
+        lane.reactor.pause.assert_called_once_with(100.5)
+        lane.canvas_motor.drv8833_set_speed.assert_called_once_with(0.0)
+
+    def test_stalled_release_stops_at_five_second_deadline(self, monkeypatch):
+        lane = _make_configured_canvas_lane(monkeypatch)
+        lane.short_moves_accel = 400.0
+        lane.move = MagicMock()
+        lane.canvas_motor.active = True
+        lane.reactor.monotonic = MagicMock(side_effect=[10.0, 10.5, 15.495, 15.5])
+        lane.reactor.pause = MagicMock()
+
+        def stop_motor(speed):
+            lane.canvas_motor.active = False
+
+        lane.canvas_motor.drv8833_set_speed.side_effect = stop_motor
+
+        lane.disengage_motors(1.0)
+
+        lane.move.assert_called_once_with(
+            -1.0, 30.0, 400.0, False, wait_for_completion=False
+        )
+        assert lane.reactor.pause.call_args_list == [call(10.5), call(15.5)]
+        lane.canvas_motor.drv8833_set_speed.assert_called_once_with(0.0)
+        assert lane.canvas_motor.active is False
+
+    @pytest.mark.parametrize("failure", ["move", "poll"])
+    def test_stops_motor_when_release_raises(self, monkeypatch, failure):
+        lane = _make_configured_canvas_lane(monkeypatch)
+        lane.short_moves_accel = 400.0
+        lane.move = MagicMock()
+        lane.canvas_motor.active = True
+        lane.reactor.pause = MagicMock()
+        if failure == "move":
+            lane.move.side_effect = RuntimeError("release failed")
+        else:
+            lane.reactor.pause.side_effect = [None, RuntimeError("release failed")]
+
+        with pytest.raises(RuntimeError, match="release failed"):
+            lane.disengage_motors(1.0)
+
+        lane.canvas_motor.drv8833_set_speed.assert_called_once_with(0.0)
+
+
 class TestAFCCanvasLaneApplyCanvasLed:
     def test_maps_fractional_red_and_white_channels_to_pwm(self, monkeypatch):
         lane = _make_configured_canvas_lane(
@@ -643,8 +739,8 @@ class TestAFCCanvasLaneRunCutterSequence:
 
 
 class TestAFCCanvasLaneCmdAfcCanvasToolUnload:
-    def test_runs_macros_then_retracts(self):
-        lane = _make_canvas_lane()
+    def test_runs_macros_then_retracts(self, monkeypatch):
+        lane = _make_initialized_canvas_lane(monkeypatch)
         lane.get_toolhead_pre_sensor_state = MagicMock(return_value=False)
         lane.disengage_motors = MagicMock()
 
@@ -715,10 +811,8 @@ class TestAFCCanvasLaneCmdAfcCanvasToolUnload:
 
 
 class TestAFCCanvasLanePulseBeforeUnload:
-    @pytest.mark.parametrize("speed", [20.0, 35.0])
-    def test_runs_backwards_for_800ms_then_stops(self, monkeypatch, speed):
+    def test_runs_backwards_for_800ms_then_stops(self, monkeypatch):
         lane = _make_initialized_canvas_lane(monkeypatch)
-        lane.short_moves_speed = speed
         events = MagicMock()
         lane.canvas_motor = events.motor
         lane.reactor = events.reactor
@@ -727,7 +821,7 @@ class TestAFCCanvasLanePulseBeforeUnload:
         lane._pulse_before_unload()
 
         assert events.mock_calls == [
-            call.motor.drv8833_set_speed(-speed),
+            call.motor.drv8833_set_speed(-30.0),
             call.reactor.monotonic(),
             call.reactor.pause(10.8),
             call.motor.drv8833_set_speed(0.0),
@@ -743,6 +837,32 @@ class TestAFCCanvasLanePulseBeforeUnload:
             lane._pulse_before_unload()
 
         assert lane.canvas_motor.drv8833_set_speed.call_args_list == [
-            call(-20.0), call(0.0),
+            call(-30.0), call(0.0),
         ]
+        assert lane.logger.messages == []
+
+    def test_disabled_skips_motor_and_pause(self, monkeypatch):
+        lane = _make_configured_canvas_lane(monkeypatch, pulse_before_unload=False)
+        lane.reactor = MagicMock()
+
+        lane._pulse_before_unload()
+
+        assert lane.pulse_before_unload is False
+        lane.canvas_motor.drv8833_set_speed.assert_not_called()
+        assert lane.reactor.mock_calls == []
+        assert lane.logger.messages == []
+
+
+class TestAFCCanvasLaneInit:
+    def test_pulse_before_unload_defaults_to_true(self, monkeypatch):
+        lane = _make_configured_canvas_lane(monkeypatch)
+
+        assert lane.pulse_before_unload is True
+        assert lane.logger.messages == []
+
+    @pytest.mark.parametrize("enabled", [True, False])
+    def test_pulse_before_unload_is_configurable(self, monkeypatch, enabled):
+        lane = _make_configured_canvas_lane(monkeypatch, pulse_before_unload=enabled)
+
+        assert lane.pulse_before_unload is enabled
         assert lane.logger.messages == []

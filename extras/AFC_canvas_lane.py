@@ -92,11 +92,12 @@ class AFCCanvasLane(AFCLane):
             buttons.register_buttons([self.odometer_pin], self.odometer_callback)
 
         self.disengage_distance = config.getfloat("disengage_distance", 1.0)
+        self.pulse_before_unload = config.getboolean("pulse_before_unload", True)
 
         if self.custom_load_cmd is None:
-            self.custom_load_cmd = "AFC_CANVAS_TOOL_LOAD LANE={}".format(self.name)
+            self.custom_load_cmd = f"AFC_CANVAS_TOOL_LOAD LANE={self.name}"
         if self.custom_unload_cmd is None:
-            self.custom_unload_cmd = "AFC_CANVAS_TOOL_UNLOAD LANE={}".format(self.name)
+            self.custom_unload_cmd = f"AFC_CANVAS_TOOL_UNLOAD LANE={self.name}"
 
         self.afc.gcode.register_mux_command(
             "AFC_CANVAS_TOOL_LOAD",
@@ -262,15 +263,31 @@ class AFCCanvasLane(AFCLane):
         self._set_gpio_pin(self.red_led_pin, red_value)
         self._set_gpio_pin(self.white_led_pin, white_value)
 
-    # Positive direction: Disengage backwards (forwards motion just happened), Negative direction: Disengage forwards (backwards motion just happened)
-    def disengage_motors(self, direction):
+    def disengage_motors(self, direction: float) -> None:
         if self.disengage_distance <= 0:
             self.do_enable(False)
             return
         self.reactor.pause(self.reactor.monotonic() + 0.5)
-        release_distance = -abs(self.disengage_distance) if direction >= 0 else abs(self.disengage_distance)
-        self.move(release_distance, 30.0, self.short_moves_accel, False)
-        self.do_enable(False)
+        release_distance = (
+            -abs(self.disengage_distance) if direction >= 0 else abs(self.disengage_distance)
+        )
+        deadline = self.reactor.monotonic() + 5.0
+        try:
+            self.move(
+                release_distance,
+                30.0,
+                self.short_moves_accel,
+                False,
+                wait_for_completion=False,
+            )
+            while self.canvas_motor.active:
+                now = self.reactor.monotonic()
+                if now >= deadline:
+                    self.logger.warning("Failed to disengage motors. Lane may have been left in an inoperable state.")
+                    break
+                self.reactor.pause(now + 0.01)
+        finally:
+            self.do_enable(False)
 
     def odometer_callback(self, eventtime, state):
         state = bool(state)
@@ -533,12 +550,12 @@ class AFCCanvasLane(AFCLane):
         return False
 
     def _pulse_before_unload(self) -> None:
-        """
-        Run the CANVAS lane motor backwards for 800 ms at short speed.
-        """
+        if not self.pulse_before_unload:
+            return
+
         try:
             self.canvas_motor.drv8833_set_speed(-30.0)
-            self.reactor.pause(self.reactor.monotonic() + 0.8)
+            self.reactor.pause(self.reactor.monotonic() + 0.6)
         finally:
             self.canvas_motor.drv8833_set_speed(0.0)
 
