@@ -418,7 +418,6 @@ class AFCCanvasLane(AFCLane):
 
     def cmd_AFC_CANVAS_TOOL_LOAD(self, gcmd):
         self.select_lane()
-        self.afc._check_extruder_temp(self)
 
         if self._cutter_sensor_engaged():
             self.afc.error.handle_lane_failure(self, "CANVAS tool load failed: cutter sensor is engaged.")
@@ -574,7 +573,6 @@ class AFCCanvasLane(AFCLane):
         ```
         """
         self.select_lane()
-        self.afc._check_extruder_temp(self)
         self.disable_buffer()
         self.unit_obj.lane_unloading(self)
 

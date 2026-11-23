@@ -90,6 +90,14 @@ def _make_configured_unit(values: dict[str, object]) -> afcUnit:
     return afcUnit(config)
 
 
+class TestAFCUnitInit:
+    def test_cold_unload_is_disabled_by_default(self):
+        assert _make_configured_unit({}).supports_cold_unload is False
+
+    def test_cold_unload_can_be_enabled_per_unit(self):
+        assert _make_configured_unit({"supports_cold_unload": "True"}).supports_cold_unload is True
+
+
 # ── __str__ ───────────────────────────────────────────────────────────────────
 
 class TestStr:

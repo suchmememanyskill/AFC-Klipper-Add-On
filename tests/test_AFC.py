@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import threading
+from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 import pytest
 
@@ -33,6 +34,23 @@ from extras.AFC_lane import AFCLaneState, AFCMoveWarning
 from klippy import Printer
 
 from tests.test_AFC_lane import _make_afc_lane
+
+
+def _make_cold_unload_lane():
+    from extras.AFC_lane import AFCLane
+    from tests.conftest import MockConfig, MockLogger, MockPrinter
+
+    obj = afc(MockConfig(name="AFC", printer=MockPrinter()))
+    obj.logger = MockLogger()
+    obj.error = MagicMock()
+    obj.function.in_print.return_value = False
+    obj.tool_cut = True
+    lane = AFCLane(MockConfig(name="AFC_stepper lane1", values={"unit": "Unit_1:1"}))
+    lane.unit_obj = MagicMock(supports_cold_unload=True)
+    lane.extruder_obj = MagicMock()
+    heater = SimpleNamespace(can_extrude=True)
+    lane.extruder_obj.get_heater.return_value = heater
+    return obj, lane, heater
 
 
 def _build_gcmd(params=None, commandline=""):
@@ -2424,6 +2442,20 @@ class TestCmdToolUnload_ErrorCounting:
         obj.afc_stats.increase_unload_error_count.assert_not_called()
 
 
+    @pytest.mark.parametrize("params, expected", [({}, False), ({"COLD_UNLOAD": "1"}, True)])
+    def test_forwards_explicit_cold_request(self, params, expected):
+        obj, lane, _ = _make_cold_unload_lane()
+        obj._check_bypass = MagicMock(return_value=False)
+        obj.lanes[lane.name] = lane
+        obj.TOOL_UNLOAD = MagicMock(return_value=True)
+
+        obj.cmd_TOOL_UNLOAD(_build_gcmd({"LANE": lane.name, **params}))
+
+        obj.TOOL_UNLOAD.assert_called_once_with(lane, cold_unload=expected)
+        obj.spool.set_active_spool.assert_called_once_with(None)
+        assert obj.logger.messages == []
+
+
 class TestCmdToolUnload_Guards:
     """Tests for cmd_TOOL_UNLOAD's early-exit guards: bypass detection, no
     lane resolvable, and an unknown lane name."""
@@ -4404,6 +4436,157 @@ class TestUnloadSequenceUnitUnloadLane:
 # New branch inside the (pre-existing) custom_unload_cmd path: a configured
 # post_unload_macro is now run after the custom unload command.
 
+class TestValidateColdUnload:
+    @pytest.mark.parametrize(
+        "condition, message",
+        [
+            ("printing", "Cold unload is only available outside a print. "
+                         "Continuing with a heated unload."),
+            ("unit", "Cold unload is disabled for this unit. Continuing with a heated unload."),
+            ("cutter", "Cold unload requires a toolhead cutter and tip forming disabled. "
+                       "Continuing with a heated unload."),
+            ("tip", "Cold unload requires a toolhead cutter and tip forming disabled. "
+                    "Continuing with a heated unload."),
+            ("cold", "Cold unload skipped: hotend is too cold to move the extruder. "
+                     "Continuing with a heated unload."),
+            ("allowed", None),
+        ],
+    )
+    def test_allows_only_supported_cold_unloads(self, condition, message):
+        obj, lane, heater = _make_cold_unload_lane()
+        obj.function.in_print.return_value = condition == "printing"
+        lane.unit_obj.supports_cold_unload = condition != "unit"
+        obj.tool_cut = condition != "cutter"
+        obj.form_tip = condition == "tip"
+        heater.can_extrude = condition != "cold"
+
+        assert obj.validate_cold_unload(lane) is (message is None)
+        obj.error.handle_lane_failure.assert_not_called()
+        assert obj.logger.messages == ([("warning", message)] if message else [])
+
+
+class TestColdUnloadSequence:
+    @pytest.mark.parametrize("enabled, can_extrude, message", [
+        (False, True, "Cold unload is disabled for this unit. Continuing with a heated unload."),
+        (True, False, "Cold unload skipped: hotend is too cold to move the extruder. "
+                      "Continuing with a heated unload."),
+    ])
+    def test_falls_back_to_heated_unload(self, enabled, can_extrude, message):
+        obj, lane, heater = _make_cold_unload_lane()
+        lane.unit_obj.supports_cold_unload = enabled
+        heater.can_extrude = can_extrude
+        lane.custom_unload_cmd = "MY_UNLOAD"
+        lane.set_tool_unloaded = MagicMock()
+        lane.disable_buffer = MagicMock()
+        obj.save_vars = MagicMock()
+        obj.afcDeltaTime = MagicMock()
+        obj.pre_unload_macro = "PARK_BEFORE_UNLOAD"
+        events = MagicMock()
+        obj._check_extruder_temp = events.prepare_temperature
+        obj.gcode.run_script_from_command = events.gcode
+        events.prepare_temperature.return_value = True
+
+        assert obj.unload_sequence(lane, None, lane.extruder_obj, cold_unload=True) is True
+        assert events.mock_calls == [
+            call.gcode("PARK_BEFORE_UNLOAD"), call.prepare_temperature(lane),
+            call.gcode("MY_UNLOAD COLD_UNLOAD=0"),
+        ]
+        lane.unit_obj.lane_unloading.assert_called_once_with(lane)
+        lane.set_tool_unloaded.assert_called_once_with(normal_toolchange=True)
+        lane.disable_buffer.assert_called_once_with()
+        assert lane.status == AFCLaneState.NONE
+        obj.error.handle_lane_failure.assert_not_called()
+        obj.afcDeltaTime.log_with_time.assert_called_once_with("Done heating toolhead")
+        assert obj.logger.messages == [
+            ("warning", message),
+            ("info", "Running custom unload command for lane lane1"),
+        ]
+
+    @pytest.mark.parametrize("fails", [False, True])
+    def test_forwards_to_custom_command_and_preserves_lane_on_error(self, fails):
+        obj, lane, _ = _make_cold_unload_lane()
+        lane.custom_unload_cmd = "MY_UNLOAD LANE=lane1"
+        lane.tool_loaded = True
+        lane.set_tool_unloaded = MagicMock()
+        lane.disable_buffer = MagicMock()
+        obj._check_extruder_temp = MagicMock()
+        obj.save_vars = MagicMock()
+        if fails:
+            obj.gcode.run_script_from_command.side_effect = lambda _: setattr(
+                lane, "status", AFCLaneState.ERROR
+            )
+
+        assert obj.unload_sequence(lane, None, lane.extruder_obj, cold_unload=True) is not fails
+        obj.gcode.run_script_from_command.assert_called_once_with("MY_UNLOAD LANE=lane1 COLD_UNLOAD=1")
+        obj._check_extruder_temp.assert_not_called()
+        if fails:
+            assert lane.status == AFCLaneState.ERROR
+            assert lane.tool_loaded is True
+            lane.set_tool_unloaded.assert_not_called()
+        else:
+            assert lane.status == AFCLaneState.NONE
+            lane.set_tool_unloaded.assert_called_once_with(normal_toolchange=True)
+        assert obj.logger.messages == [("info", "Running custom unload command for lane lane1")]
+
+    @pytest.mark.parametrize("retract", ["Sensor move", "Buffer Move", "After extruder"])
+    def test_boxturtle_retracts_only_after_cut(self, retract):
+        obj, lane, heater = _make_cold_unload_lane()
+        obj.afcDeltaTime = MagicMock()
+        obj.save_vars = MagicMock()
+        obj._check_extruder_temp = MagicMock()
+        lane.unit_obj = MagicMock(spec=["supports_cold_unload", "lane_unloading", "select_lane",
+                                        "move_to_hub", "lane_loaded", "return_to_home"],
+                                  supports_cold_unload=True)
+        lane.unit_obj.move_to_hub.return_value = (True, 100, AFCMoveWarning.NONE)
+        lane.tool_max_unload_attempts = 3
+        lane.get_trailing = MagicMock(return_value=True)
+        lane.get_toolhead_pre_sensor_state = MagicMock(side_effect=[True, False])
+        lane.assist_move = MagicMock()
+        lane.disable_buffer = MagicMock()
+        lane.sync_to_extruder = MagicMock()
+        lane.unsync_to_extruder = MagicMock()
+        lane.set_tool_unloaded = MagicMock()
+        lane.move_advanced = MagicMock()
+        lane.espooler.stats = MagicMock()
+        extruder = lane.extruder_obj
+        extruder.tool_start = "buffer" if retract == "Buffer Move" else "sensor"
+        extruder.tool_unload_speed = 25
+        extruder.tool_stn_unload = 42
+        extruder.tool_end_state = False
+        extruder.tool_sensor_after_extruder = 2 if retract == "After extruder" else 0
+        extruder.is_standalone.return_value = False
+        hub = SimpleNamespace(afc_unload_bowden_length=100, state=False,
+                              hub_clear_move_dis=10, cut=False)
+        events = MagicMock()
+        obj.move_e_pos = events.move
+        obj.do_tool_cut_tip_form = events.cut
+
+        assert obj.unload_sequence(lane, hub, extruder, cold_unload=True) is True
+
+        expected = [call.cut(lane, extruder)]
+        if retract == "Buffer Move":
+            expected.append(call.move(-42, 25, "Buffer Move"))
+            logs = [call("TOOL_UNLOAD: Buffer-Unloading from toolhead(tool_stn_unload)")]
+        else:
+            expected.append(call.move(-42, 25, "Sensor move", wait_tool=True))
+            logs = [call("TOOL_UNLOAD: Sensor-Unloading from toolhead(tool_stn_unload), Try:1")]
+        logs.append(call("Unloaded from toolhead"))
+        if retract == "After extruder":
+            expected.append(call.move(-2, 25, "After extruder"))
+            logs.append(call("Tool sensor after extruder move done"))
+        logs += [call("Long retract done"), call("Hub cleared")]
+
+        assert events.mock_calls == expected
+        obj._check_extruder_temp.assert_not_called()
+        assert heater.can_extrude is True
+        assert lane.loaded_to_hub is True
+        assert lane.status == AFCLaneState.NONE
+        lane.set_tool_unloaded.assert_called_once_with(normal_toolchange=True)
+        obj.error.handle_lane_failure.assert_not_called()
+        assert obj.afcDeltaTime.log_with_time.call_args_list == logs
+        assert obj.logger.messages == []
+
+
 class TestUnloadSequenceCustomCmdPostUnloadMacro:
     def _make(self):
         afc = _make_afc()
@@ -4425,7 +4608,7 @@ class TestUnloadSequenceCustomCmdPostUnloadMacro:
 
         afc.unload_sequence(lane, hub, extruder)
 
-        gcode_calls = [call("MY_CUSTOM_UNLOAD"), call("MY_POST_MACRO")]
+        gcode_calls = [call("MY_CUSTOM_UNLOAD COLD_UNLOAD=0"), call("MY_POST_MACRO")]
         assert afc.gcode.run_script_from_command.call_args_list == gcode_calls
         lane.set_tool_unloaded.assert_called_once_with(normal_toolchange=True)
 
@@ -4435,18 +4618,11 @@ class TestUnloadSequenceCustomCmdPostUnloadMacro:
 
         afc.unload_sequence(lane, hub, extruder)
 
-        assert afc.gcode.run_script_from_command.call_args_list == [call("MY_CUSTOM_UNLOAD")]
+        afc.gcode.run_script_from_command.assert_called_once_with("MY_CUSTOM_UNLOAD COLD_UNLOAD=0")
         lane.set_tool_unloaded.assert_called_once_with(normal_toolchange=True)
 
     def test_pre_unload_macro_runs_before_heater_preparation(self):
-        from extras.AFC_lane import AFCLane
-        from tests.conftest import MockConfig, MockLogger, MockPrinter
-
-        obj = afc(MockConfig(name="AFC", printer=MockPrinter()))
-        obj.logger = MockLogger()
-        lane = AFCLane(MockConfig(name="AFC_stepper lane1", values={"unit": "Unit_1:1"}))
-        lane.unit_obj = MagicMock()
-        lane.extruder_obj = MagicMock()
+        obj, lane, _ = _make_cold_unload_lane()
         obj.pre_unload_macro = "PARK_BEFORE_UNLOAD"
         lane.custom_unload_cmd = "MY_UNLOAD"
         lane.set_tool_unloaded = MagicMock()
@@ -4461,7 +4637,7 @@ class TestUnloadSequenceCustomCmdPostUnloadMacro:
 
         assert events.mock_calls == [
             call.gcode("PARK_BEFORE_UNLOAD"), call.prepare_temperature(lane),
-            call.gcode("MY_UNLOAD"),
+            call.gcode("MY_UNLOAD COLD_UNLOAD=0"),
         ]
         lane.set_tool_unloaded.assert_called_once_with(normal_toolchange=True)
         assert lane.status == AFCLaneState.NONE
@@ -4658,11 +4834,15 @@ class TestToolUnloadDisplayStatusLifecycle:
             side_effect=lambda var, val: events.append(('display', var, val)))
         return afc, lane, events
 
-    def test_retraction_true_then_false_around_successful_unload(self):
+    @pytest.mark.parametrize("cold_unload", [False, True])
+    def test_retraction_true_then_false_around_successful_unload(self, cold_unload):
         afc, lane, events = self._make()
         afc.unload_sequence = MagicMock(side_effect=_recorder(events, 'unload_sequence', return_value=True))
 
-        assert afc.TOOL_UNLOAD(lane, force_unload=True)
+        assert afc.TOOL_UNLOAD(lane, force_unload=True, cold_unload=cold_unload)
+        afc.unload_sequence.assert_called_once_with(
+            lane, lane.hub_obj, lane.extruder_obj, cold_unload=cold_unload
+        )
 
         assert events == [
             ('display', 'retraction', True), 'unload_sequence', ('display', 'retraction', False)]

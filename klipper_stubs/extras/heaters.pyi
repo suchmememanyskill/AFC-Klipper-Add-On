@@ -4,6 +4,7 @@
 
 class Heater:
     target_temp: float
+    can_extrude: bool
 
 class PrinterHeaters:
     def set_temperature(self, heater: Heater, temp: float, wait: bool = False) -> None: ...

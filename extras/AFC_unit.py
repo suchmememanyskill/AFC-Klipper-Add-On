@@ -136,6 +136,7 @@ class afcUnit:
 
         # If True, the unload retract is assisted to prevent loose windings, especially on full spools. This can prevent loops from slipping off the spool. Setting value here overrides values set in AFC.cfg file
         self.assisted_unload    = config.getboolean("assisted_unload", self.afc.assisted_unload)
+        self.supports_cold_unload = config.getboolean("supports_cold_unload", False)
         # When True AFC will unload lane and then pause when runout is triggered and spool to swap to is not set(infinite spool). Setting value here overrides values set in AFC.cfg file
         self.unload_on_runout   = config.getboolean("unload_on_runout", self.afc.unload_on_runout)
 

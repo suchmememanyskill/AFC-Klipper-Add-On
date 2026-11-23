@@ -557,6 +557,7 @@ class TestAFCCanvasLaneCmdAfcCanvasToolLoad:
 
         AFCCanvasLane.cmd_AFC_CANVAS_TOOL_LOAD(lane, MagicMock())
 
+        lane.afc._check_extruder_temp.assert_not_called()
         assert lane.get_toolhead_pre_sensor_state.call_count == 3
         assert lane.afc.gcode.run_script_from_command.call_args_list == [
             call("AFC_PARK EXTRUDER=extruder")
@@ -774,7 +775,7 @@ class TestAFCCanvasLaneCmdAfcCanvasToolUnload:
         lane.cmd_AFC_CANVAS_TOOL_UNLOAD(MagicMock())
 
         lane.select_lane.assert_called_once_with()
-        lane.afc._check_extruder_temp.assert_called_once_with(lane)
+        lane.afc._check_extruder_temp.assert_not_called()
         lane.disable_buffer.assert_called_once_with()
         lane.unit_obj.lane_unloading.assert_called_once_with(lane)
         lane.run_cutter_sequence.assert_not_called()
@@ -796,7 +797,7 @@ class TestAFCCanvasLaneCmdAfcCanvasToolUnload:
         lane.cmd_AFC_CANVAS_TOOL_UNLOAD(MagicMock())
 
         lane.select_lane.assert_called_once_with()
-        lane.afc._check_extruder_temp.assert_called_once_with(lane)
+        lane.afc._check_extruder_temp.assert_not_called()
         lane.disable_buffer.assert_called_once_with()
         lane.unit_obj.lane_unloading.assert_called_once_with(lane)
         lane.run_cutter_sequence.assert_called_once_with()

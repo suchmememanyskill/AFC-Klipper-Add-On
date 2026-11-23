@@ -2058,7 +2058,7 @@ class afc:
 
         Usage
         -----
-        `TOOL_UNLOAD LANE=<lane>`
+        `TOOL_UNLOAD LANE=<lane> COLD_UNLOAD=<0 or 1>`
 
         Example
         -----
@@ -2079,7 +2079,8 @@ class afc:
             self.logger.info('{} Unknown'.format(lane))
             return
         cur_lane = self.lanes[lane]
-        if not self.TOOL_UNLOAD(cur_lane):
+        cold_unload = bool(gcmd.get_int("COLD_UNLOAD", 0, minval=0, maxval=1))
+        if not self.TOOL_UNLOAD(cur_lane, cold_unload=cold_unload):
             # Error happened, reset toolchanges without error count
             # and increase unload error count
             self.afc_stats.increase_unload_error_count(self)
@@ -2088,7 +2089,7 @@ class afc:
         self.spool.set_active_spool(None)
 
     def TOOL_UNLOAD(self, cur_lane: AFCLane, set_start_time: bool=True, force_unload: bool=False,
-                    restore_temp: bool=True) -> bool:
+                    restore_temp: bool=True, *, cold_unload: bool=False) -> bool:
         """
         This function handles the unloading of a specified lane from the tool. It performs
         several checks and movements to ensure the lane is properly unloaded.
@@ -2100,6 +2101,7 @@ class afc:
                              toolhead.
         :param restore_temp: Set False to skip restoring the toolhead's temperature when
                              done, needed when the caller manages temperature itself.
+        :param cold_unload: Request an unload without heating on supported units.
         :return bool: True if unloading was successful, False if an error occurred.
         """
         # Check if the bypass filament sensor detects filament; if so unload filament and abort the tool load.
@@ -2194,7 +2196,7 @@ class afc:
                 # Run the unload sequence, which may include custom gcode commands.
                 self._set_display_status('retraction', True)
                 try:
-                    success = self.unload_sequence(cur_lane, cur_hub, cur_extruder)
+                    success = self.unload_sequence(cur_lane, cur_hub, cur_extruder, cold_unload=cold_unload)
                 finally:
                     self._set_display_status('retraction', False)
                 if not success:
@@ -2252,7 +2254,30 @@ class afc:
                 self.afcDeltaTime.log_with_time("TOOL_UNLOAD: After custom form tip")
                 self.function.log_toolhead_pos()
 
-    def unload_sequence(self, cur_lane: AFCLane, cur_hub: afc_hub, cur_extruder: AFCExtruder):
+    def validate_cold_unload(self, cur_lane: AFCLane) -> bool:
+        """
+        Check whether the lane can unload without heating and warn if it cannot.
+
+        :param cur_lane: Lane to unload.
+        :return bool: Whether cold unload is available.
+        """
+        if self.function.in_print():
+            message = "Cold unload is only available outside a print"
+        elif not cur_lane.unit_obj.supports_cold_unload:
+            message = "Cold unload is disabled for this unit"
+        elif (not self.tool_cut
+              or self.form_tip):
+            message = "Cold unload requires a toolhead cutter and tip forming disabled"
+        elif not cur_lane.extruder_obj.get_heater().can_extrude:
+            message = "Cold unload skipped: hotend is too cold to move the extruder"
+        else:
+            return True
+
+        self.logger.warning(f"{message}. Continuing with a heated unload.")
+        return False
+
+    def unload_sequence(self, cur_lane: AFCLane, cur_hub: afc_hub, cur_extruder: AFCExtruder,
+                        *, cold_unload: bool=False) -> bool:
         """
         This function controls the unloading sequence and allows for custom gcode commands to be executed
         during the loading process.
@@ -2260,7 +2285,13 @@ class afc:
         :param cur_lane: The lane object to be loaded.
         :param cur_hub: The hub object associated with the lane.
         :param cur_extruder: The extruder object associated with the lane.
+        :param cold_unload: Request an unload without heating on supported units.
+        :return bool: True if unloading succeeds.
         """
+
+        if (cold_unload
+            and not self.validate_cold_unload(cur_lane)):
+            cold_unload = False
 
         # Activate LED indicator for unloading.
         cur_lane.unit_obj.lane_unloading(cur_lane)
@@ -2269,14 +2300,19 @@ class afc:
             self.gcode.run_script_from_command(self.pre_unload_macro)
 
         # Prepare the extruder and hotend for unloading.
-        if self._check_extruder_temp(cur_lane):
+        if (not cold_unload
+            and self._check_extruder_temp(cur_lane)):
             self.afcDeltaTime.log_with_time("Done heating toolhead")
 
         if cur_lane.custom_unload_cmd:
             self.logger.info("Running custom unload command for lane {}".format(cur_lane.name))
 
             cur_lane.status = AFCLaneState.TOOL_UNLOADING
-            self.gcode.run_script_from_command(cur_lane.custom_unload_cmd)
+            self.gcode.run_script_from_command(
+                f"{cur_lane.custom_unload_cmd} COLD_UNLOAD={int(cold_unload)}"
+            )
+            if cur_lane.status == AFCLaneState.ERROR:
+                return False
 
             if self.post_unload_macro is not None:
                 self.gcode.run_script_from_command(self.post_unload_macro)
@@ -2295,8 +2331,9 @@ class afc:
                 use_direct_dist = True
 
             # Quick pull to prevent oozing.
-            self.move_e_pos( -2, cur_extruder.tool_unload_speed, "Quick Pull", wait_tool=False)
-            self.function.log_toolhead_pos("TOOL_UNLOAD quick pull: ")
+            if not cold_unload:
+                self.move_e_pos(-2, cur_extruder.tool_unload_speed, "Quick Pull", wait_tool=False)
+                self.function.log_toolhead_pos("TOOL_UNLOAD quick pull: ")
 
             # Disable the buffer if it's active.
             cur_lane.disable_buffer()
