@@ -238,6 +238,7 @@ class afc:
         self.enable_standalone_purge: bool = config.getboolean("enable_standalone_purge", True)
 
         self.post_load_macro        = config.get("post_load_macro", None)
+        self.pre_unload_macro       = config.get("pre_unload_macro", None)
         self.post_unload_macro      = config.get("post_unload_macro", None)
 
         self.form_tip               = config.getboolean("form_tip", False)          # Set to True to tip forming when unloading lanes
@@ -2263,6 +2264,9 @@ class afc:
 
         # Activate LED indicator for unloading.
         cur_lane.unit_obj.lane_unloading(cur_lane)
+
+        if self.pre_unload_macro:
+            self.gcode.run_script_from_command(self.pre_unload_macro)
 
         # Prepare the extruder and hotend for unloading.
         if self._check_extruder_temp(cur_lane):

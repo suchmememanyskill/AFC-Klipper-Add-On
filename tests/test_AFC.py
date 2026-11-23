@@ -247,6 +247,7 @@ def _make_afc():
     obj.wipe_cmd = None
     obj.park_pre_load = False
     obj.park_pre_load_cmd = None
+    obj.pre_unload_macro = None
     obj.kick = False
     obj.kick_cmd = None
     obj.post_load_macro = None
@@ -4436,6 +4437,35 @@ class TestUnloadSequenceCustomCmdPostUnloadMacro:
 
         assert afc.gcode.run_script_from_command.call_args_list == [call("MY_CUSTOM_UNLOAD")]
         lane.set_tool_unloaded.assert_called_once_with(normal_toolchange=True)
+
+    def test_pre_unload_macro_runs_before_heater_preparation(self):
+        from extras.AFC_lane import AFCLane
+        from tests.conftest import MockConfig, MockLogger, MockPrinter
+
+        obj = afc(MockConfig(name="AFC", printer=MockPrinter()))
+        obj.logger = MockLogger()
+        lane = AFCLane(MockConfig(name="AFC_stepper lane1", values={"unit": "Unit_1:1"}))
+        lane.unit_obj = MagicMock()
+        lane.extruder_obj = MagicMock()
+        obj.pre_unload_macro = "PARK_BEFORE_UNLOAD"
+        lane.custom_unload_cmd = "MY_UNLOAD"
+        lane.set_tool_unloaded = MagicMock()
+        lane.disable_buffer = MagicMock()
+        obj.save_vars = MagicMock()
+        events = MagicMock()
+        obj._check_extruder_temp = events.prepare_temperature
+        obj.gcode.run_script_from_command = events.gcode
+        events.prepare_temperature.return_value = False
+
+        assert obj.unload_sequence(lane, None, lane.extruder_obj) is True
+
+        assert events.mock_calls == [
+            call.gcode("PARK_BEFORE_UNLOAD"), call.prepare_temperature(lane),
+            call.gcode("MY_UNLOAD"),
+        ]
+        lane.set_tool_unloaded.assert_called_once_with(normal_toolchange=True)
+        assert lane.status == AFCLaneState.NONE
+        assert obj.logger.messages == [("info", "Running custom unload command for lane lane1")]
 
 # ── _set_display_status ──────────────────────────────────────────────────────
 
