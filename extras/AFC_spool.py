@@ -93,6 +93,7 @@ class AFCSpool:
         self.gcode.register_mux_command('SET_WEIGHT',           "LANE", lane_obj.name, self.cmd_SET_WEIGHT,             desc=self.cmd_SET_WEIGHT_help)
         self.gcode.register_mux_command('SET_MATERIAL',         "LANE", lane_obj.name, self.cmd_SET_MATERIAL,           desc=self.cmd_SET_MATERIAL_help)
         self.gcode.register_mux_command('SET_SPOOL_ID',         "LANE", lane_obj.name, self.cmd_SET_SPOOL_ID,           desc=self.cmd_SET_SPOOL_ID_help)
+        self.gcode.register_mux_command('SET_SPOOL_ID_BY_TAG',  "LANE", lane_obj.name, self.cmd_SET_SPOOL_ID_BY_TAG,    desc=self.cmd_SET_SPOOL_ID_BY_TAG_help)
         self.gcode.register_mux_command('SET_RUNOUT',           "LANE", lane_obj.name, self.cmd_SET_RUNOUT,             desc=self.cmd_SET_RUNOUT_help)
         self.gcode.register_mux_command('SET_MAP',              "LANE", lane_obj.name, self.cmd_SET_MAP,                desc=self.cmd_SET_MAP_help)
         self.gcode.register_mux_command('AFC_SET_SPOOL_TEMP',   "LANE", lane_obj.name, self.cmd_AFC_SET_SPOOL_TEMP,     desc=self.cmd_AFC_SET_SPOOL_TEMP_help)
@@ -617,6 +618,48 @@ class AFCSpool:
             self.set_spoolID(cur_lane, SpoolID,
                              on_done=lambda: self._update_active_spool_if_current(cur_lane))
 
+    cmd_SET_SPOOL_ID_BY_TAG_help = "Set lane spoolman ID by tag UID"
+    def cmd_SET_SPOOL_ID_BY_TAG(self, gcmd: GCodeCommand) -> None:
+        """
+        This function handles setting the spool ID for a specified lane based on RFID tag UID. It retrieves
+        the lane specified by the 'LANE' parameter and updates its spool ID, material, color, and weight
+        based on the information retrieved from the spoolman API.
+
+        Usage
+        -----
+        `SET_SPOOL_ID_BY_TAG LANE=<lane> TAG_UID=<tag>
+
+        Example
+        -----
+        ```
+        SET_SPOOL_ID_BY_TAG LANE=lane1 TAG_UID=A1B2C3D4E5F600
+        ```
+        """
+        if self.afc.spoolman is None:
+            self.logger.error("Spoolman is not configured")
+            return
+
+        lane_name = gcmd.get("LANE", None)
+        tag_uid = gcmd.get("TAG_UID", "").strip()
+
+        if lane_name is None:
+            self.logger.info("No LANE defined")
+            return
+
+        cur_lane = self.afc.lanes.get(lane_name)
+        if cur_lane is None:
+            self.logger.info(f"{lane_name} unknown")
+            return
+
+        if not tag_uid:
+            self.logger.error("TAG_UID is required")
+            return
+
+        # Updating the active spool in Spoolman needs to wait for set_spoolID_by_tag's
+        # async fetch to actually apply the new spool_id to the lane first
+        self.set_spoolID_by_tag(cur_lane, tag_uid,
+                                on_done=lambda: self._update_active_spool_if_current(cur_lane))
+
     def _update_active_spool_if_current(self, cur_lane: AFCLane) -> None:
         """
         Pushes a lane's spool ID to Spoolman as the active spool if this lane
@@ -685,6 +728,59 @@ class AFCSpool:
         cur_lane.clear_lane_data()
         cur_lane.spool_vendor = ""
         cur_lane.filament_name = ""
+
+    def set_spoolID_by_tag(self, cur_lane: AFCLane, tag_uid: str,
+                           save_vars: bool = True, on_done: Optional[Callable[[], None]] = None) -> None:
+        uid = tag_uid.strip()
+        if not uid:
+            self.afc.error.AFC_error("A tag UID is required", False)
+            return
+
+        if self.afc.spoolman is None or self.afc.moonraker is None:
+            self.afc.error.AFC_error("Spoolman is not configured", False)
+            return
+
+        self.afc.moonraker.get_spools_by_tag(
+            uid,
+            lambda result: self._on_spool_tag_lookup(
+                cur_lane, uid, result, save_vars, on_done
+            ),
+        )
+
+    def _on_spool_tag_lookup(self, cur_lane: AFCLane, tag_uid: str,
+                             result: Optional[list[dict[str, Any]]], save_vars: bool, on_done: Optional[Callable[[], None]]) -> None:
+        if not result:
+            self.afc.error.AFC_error(
+                f"No Spoolman spool found for tag {tag_uid}", False
+            )
+            return
+
+        if len(result) != 1:
+            self.afc.error.AFC_error(
+                f"Tag {tag_uid} matched {len(result)} spools; expected one", False
+            )
+            return
+
+        try:
+            spool_id = int(result[0]["id"])
+        except (KeyError, TypeError, ValueError) as e:
+            self.afc.error.AFC_error(
+                f"Invalid spool result for tag {tag_uid}: {e}", False
+            )
+            return
+
+        if (cur_lane.spool_id != spool_id
+            and any(
+                spool_id == lane.spool_id
+                for lane in self.afc.lanes.values()
+            )):
+            self.afc.error.AFC_error(
+                f"SpoolId {spool_id} is already assigned to another lane", False
+            )
+            return
+
+        self.afc.logger.debug(f"Spoolman tag lookup for {tag_uid} matched SpoolID {spool_id}")
+        self.set_spoolID(cur_lane, spool_id, save_vars, on_done)
 
     def set_spoolID(self, cur_lane: AFCLane, SpoolID: Optional[Union[int, str]],
                     save_vars: bool = True, on_done: Optional[Callable[[], None]] = None) -> None:

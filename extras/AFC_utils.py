@@ -714,6 +714,40 @@ class AFC_moonraker:
             self._log_async(self.logger.info, f"SpoolID: {id} not found")
         self.reactor.register_async_callback(lambda et, resp=resp: callback(resp))
 
+    def get_spools_by_tag(self, tag_uid: str, callback: Callable[[Optional[list[dict[str, Any]]]], None]) -> None:
+        """
+        Queues a query for a matching tag's spool data from spoolman (via moonrakers proxy)
+        to run on the background writer thread. Runs asynchronously because
+        this can be called from a load sequence and can't block on the HTTP
+        round trip.
+
+        :param id: Spool tag UID to lookup and fetch data from spoolman
+        :param callback: Called with the spool data dict (or None if error
+                         occurred or ID does not exist) once the query completes.
+                         Runs on the reactor thread.
+        """
+        self._write_queue.put_nowait((self._get_spools_by_tag_sync, (tag_uid, callback)))
+
+    def _get_spools_by_tag_sync(self, tag_uid: str, callback: Callable[[Optional[list[dict[str, Any]]]], None]) -> None:
+        """
+        Does the actual GET for a spool's data from spoolman. Called from the
+        background writer thread; schedules callback on the reactor thread.
+
+        :param tag_uid: Spool tag UID to lookup and fetch data from spoolman
+        :param callback: Called with the spool data dict (or None on failure)
+        """
+        request_payload = {
+            "request_method": "GET",
+            "path": f"/v1/spool?tag={quote(tag_uid.strip(), safe='')}",
+        }
+        spool_url = urljoin(self.host, "server/spoolman/proxy")
+        req = Request(spool_url, urlencode(request_payload).encode())
+
+        resp = self._get_results(req)
+        if resp is None:
+            self._log_async(self.logger.info, f"Spool TagUID: {tag_uid} not found")
+        self.reactor.register_async_callback(lambda et, resp=resp: callback(resp))
+
     def check_for_td1(self) -> tuple[bool, bool, bool]:
         """
         Checks moonrakers server/config endpoint to see if user has `[td1]` and `[lane_data]`
